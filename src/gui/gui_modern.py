@@ -317,12 +317,7 @@ class ModernTranslateNovelAI(ctk.CTk):
             self.sidebar_frame,
             values=[
                 "Bối cảnh hiện đại",
-                "Bối cảnh cổ đại", 
-                "Bối cảnh fantasy/viễn tưởng",
-                "Bối cảnh học đường",
-                "Bối cảnh công sở",
-                "Bối cảnh lãng mạn",
-                "Bối cảnh hành động",
+                "Bối cảnh cổ đại",
                 "Tùy chỉnh"
             ],
             variable=self.context_var,
@@ -802,7 +797,23 @@ class ModernTranslateNovelAI(ctk.CTk):
         if choice == "Tùy chỉnh":
             self.custom_prompt_frame.grid(row=4, column=0, sticky="ew", padx=20, pady=10)
             # Load default custom prompt
-            default_custom = "#Xác định đúng bối cảnh và dùng văn phong phù hợp (bối cảnh hiện đại, cổ đại,...) trước khi bắt đầu dịch #Chỉ trả về output văn bản dịch, không trả về các nội dung không liên quan. #Xách định các mối quan hệ và danh xưng của các nhân vật hiện tại trong truyện sau đó dịch văn bản sang tiếng Việt.  #Dùng văn phong  và bối cảnh hiện đại. #Đảm bảo các câu thoại nhân vật được dịch chính xác với danh dưng phù hợp và đặt trong dấu . Đảm bảo giữ nguyên chi tiết nội dung."
+            default_custom = """Bạn là một chuyên gia dịch thuật, chuyên dịch truyện sang tiếng Việt. Nhiệm vụ của bạn là dịch văn bản sau đây một cách chính xác, tự nhiên và tuân thủ nghiêm ngặt các quy tắc dưới đây.
+
+# QUY TẮC DỊCH THUẬT (BẮT BUỘC TUÂN THỦ)
+
+1. Văn phong và Bối cảnh:
+*   Sử dụng văn phong hiện đại, tự nhiên, phù hợp với bối cảnh của câu chuyện và phù hợp với ngữ pháp tiếng Việt.
+*   Giữ nguyên tất cả các chi tiết, mô tả và nội dung gốc. Không được lược bỏ hay thay đổi ý nghĩa của văn bản.
+
+2. Lời thoại và Xưng hô:
+*   Xác định rõ mối quan hệ giữa các nhân vật  (cha-con, anh-em, chị-em, mẹ-con,...)  để sử dụng đại từ nhân xưng và cách xưng hô cho phù hợp, nhất quán trong toàn bộ văn bản.
+*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
+
+3. Định dạng Output:
+*   Chỉ trả về văn bản đã dịch. Không thêm bất kỳ lời bình luận, giải thích hay nội dung nào khác ngoài bản dịch.
+
+---
+BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
             self.custom_prompt_textbox.delete("0.0", "end")
             self.custom_prompt_textbox.insert("0.0", default_custom)
         else:
@@ -812,16 +823,56 @@ class ModernTranslateNovelAI(ctk.CTk):
         """Tạo system instruction dựa trên bối cảnh đã chọn"""
         context = self.context_var.get()
         
-        base_instruction = "#Xác định đúng bối cảnh và dùng văn phong phù hợp (bối cảnh hiện đại, cổ đại,...) trước khi bắt đầu dịch #Chỉ trả về output văn bản dịch, không trả về các nội dung không liên quan. #Xách định các mối quan hệ và danh xưng của các nhân vật hiện tại trong truyện sau đó dịch văn bản sang tiếng Việt.  #Dùng văn phong  và bối cảnh hiện đại. #Đảm bảo các câu thoại nhân vật được dịch chính xác với danh dưng phù hợp và đặt trong dấu . Đảm bảo giữ nguyên chi tiết nội dung."
+        base_instruction = """Bạn là một chuyên gia dịch thuật, chuyên dịch truyện sang tiếng Việt. Nhiệm vụ của bạn là dịch văn bản sau đây một cách chính xác, tự nhiên và tuân thủ nghiêm ngặt các quy tắc dưới đây.
+
+# QUY TẮC DỊCH THUẬT (BẮT BUỘC TUÂN THỦ)
+
+1. Văn phong và Bối cảnh:
+*   Sử dụng văn phong hiện đại, tự nhiên, phù hợp với bối cảnh của câu chuyện và phù hợp với ngữ pháp tiếng Việt.
+*   Giữ nguyên tất cả các chi tiết, mô tả và nội dung gốc. Không được lược bỏ hay thay đổi ý nghĩa của văn bản.
+
+2. Lời thoại và Xưng hô:
+*   Xác định rõ mối quan hệ giữa các nhân vật  (cha-con, anh-em, chị-em, mẹ-con,...)  để sử dụng đại từ nhân xưng và cách xưng hô cho phù hợp, nhất quán trong toàn bộ văn bản.
+*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
+
+3. Định dạng Output:
+*   Chỉ trả về văn bản đã dịch. Không thêm bất kỳ lời bình luận, giải thích hay nội dung nào khác ngoài bản dịch.
+
+---
+BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         
         context_instructions = {
-            "Bối cảnh hiện đại": f"{base_instruction} Bối cảnh hiện đại. Giữ nguyên các từ ngữ thô tục, tình dục.",
-            "Bối cảnh cổ đại": f"{base_instruction} Bối cảnh cổ đại. Sử dụng ngôn ngữ trang trọng, lịch sự phù hợp thời kỳ cổ đại. Dùng danh xưng cổ điển như 'ngươi', 'ta', 'hạ thần'.",
-            "Bối cảnh fantasy/viễn tưởng": f"{base_instruction} Bối cảnh fantasy/viễn tưởng. Giữ nguyên tên thuật ngữ ma thuật, tên kỹ năng, tên vũ khí đặc biệt. Dịch sát nghĩa các thuật ngữ fantasy.",
-            "Bối cảnh học đường": f"{base_instruction} Bối cảnh học đường. Sử dụng ngôn ngữ trẻ trung, năng động. Dịch chính xác các danh xưng học sinh, thầy cô.",
-            "Bối cảnh công sở": f"{base_instruction} Bối cảnh công sở. Sử dụng ngôn ngữ lịch sự, trang trọng phù hợp môi trường làm việc. Dịch chính xác chức danh, thuật ngữ kinh doanh.",
-            "Bối cảnh lãng mạn": f"{base_instruction} Bối cảnh lãng mạn. Chú trọng cảm xúc, ngôn ngữ ngọt ngào, lãng mạn. Dịch tinh tế các câu tỏ tình, biểu đạt tình cảm.",
-            "Bối cảnh hành động": f"{base_instruction} Bối cảnh hành động. Giữ nguyên tên kỹ năng, vũ khí, thuật ngữ chiến đấu. Dịch mạnh mẽ, năng động các cảnh hành động.",
+            "Bối cảnh hiện đại": f"""{base_instruction}
+
+# BỐI CẢNH ĐẶC BIỆT - HIỆN ĐẠI:
+
+4. Văn phong hiện đại:
+*   Sử dụng ngôn ngữ tự nhiên, gần gũi, phù hợp với cuộc sống hiện đại
+*   Danh xưng: anh/chị, em, bạn, cậu/mày, ông/bà (tùy mối quan hệ)
+*   Giữ nguyên các từ ngữ thô tục, tình dục, slang nếu có trong nguyên bản
+*   Sử dụng thuật ngữ công nghệ, mạng xã hội, đời sống đô thị hiện đại
+
+5. Đặc điểm riêng:
+*   Lời thoại tự nhiên như người Việt nói hàng ngày
+*   Không cần quá trang trọng trừ khi ngữ cảnh yêu cầu
+*   Giữ nguyên tên riêng, địa danh, thương hiệu nước ngoài""",
+
+            "Bối cảnh cổ đại": f"""{base_instruction}
+
+# BỐI CẢNH ĐẶC BIỆT - CỔ ĐẠI:
+
+4. Văn phong cổ điển:
+*   Sử dụng ngôn ngữ trang trọng, lịch thiệp phù hợp thời kỳ cổ đại
+*   Danh xưng cổ điển: ta/ngươi, hạ thần/thần tử, công tử/tiểu thư, sư phụ/đồ đệ
+*   Thuật ngữ võ thuật: công pháp, tâm pháp, tu vi, cảnh giới, đan dược
+*   Chức vị cổ đại: hoàng thượng, hoàng hậu, thái tử, đại thần, tướng quân
+
+5. Đặc điểm riêng:
+*   Lời thoại trang nghiêm, có phép tắc
+*   Sử dụng từ Hán Việt khi phù hợp
+*   Giữ nguyên tên võ công, tâm pháp, địa danh cổ đại
+*   Thể hiện đúng thứ bậc, lễ nghĩa trong xã hội phong kiến""",
+
             "Tùy chỉnh": self.custom_prompt_textbox.get("0.0", "end").strip() if hasattr(self, 'custom_prompt_textbox') else base_instruction
         }
         

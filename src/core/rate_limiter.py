@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rate Limiter cho Google AI API
+Multi-Threading Safe Rate Limiter cho Google AI API
 Giúp tránh vượt quá giới hạn RPM (Requests Per Minute) của Google AI
+Hỗ trợ thực sự multi-threading với adaptive throttling
 """
 
 import time
@@ -11,14 +12,19 @@ from collections import deque
 from datetime import datetime, timedelta
 
 
-class RateLimiter:
+class MultiThreadRateLimiter:
     """
-    Rate limiter đơn giản sử dụng sliding window
+    Multi-threading safe rate limiter sử dụng sliding window
     
     Google AI Free Tier Limits:
     - Gemini 2.0 Flash: 10 RPM, 1,500,000 TPM
     - Gemini 1.5 Flash: 15 RPM, 1,000,000 TPM  
     - Gemini 1.5 Pro: 2 RPM, 32,000 TPM
+    
+    Features:
+    - Thread-safe operations
+    - Adaptive throttling khi gặp rate limit errors
+    - Non-blocking acquire cho multi-threading
     """
     
     def __init__(self, requests_per_minute=10, window_seconds=60):
@@ -29,67 +35,76 @@ class RateLimiter:
             requests_per_minute: Số requests tối đa mỗi phút
             window_seconds: Kích thước cửa sổ thời gian (mặc định 60s)
         """
+        self.base_max_requests = requests_per_minute
         self.max_requests = requests_per_minute
         self.window_seconds = window_seconds
         self.requests = deque()
         self.lock = threading.Lock()
         
+        # Adaptive throttling
+        self.consecutive_errors = 0
+        self.last_error_time = None
+        self.throttle_factor = 1.0
+        self.min_throttle = 0.3  # Tối thiểu 30% RPM gốc
+        self.max_throttle = 1.0  # Tối đa 100% RPM gốc
+        
     def acquire(self):
         """
-        Acquire permission to make a request
-        Blocks if rate limit would be exceeded
+        Multi-threading safe acquire permission to make a request
+        Sử dụng distributed timing thay vì blocking sleep
         """
-        with self.lock:
-            now = datetime.now()
-            
-            # Xóa các requests cũ ngoài window
-            cutoff_time = now - timedelta(seconds=self.window_seconds)
-            while self.requests and self.requests[0] < cutoff_time:
-                self.requests.popleft()
-            
-            # Kiểm tra xem có vượt quá limit không
-            if len(self.requests) >= self.max_requests:
-                # Tính thời gian cần chờ
+        max_attempts = 10
+        attempt = 0
+        
+        while attempt < max_attempts:
+            with self.lock:
+                now = datetime.now()
+                self._cleanup_old_requests(now)
+                
+                # Kiểm tra xem có slot available không
+                if len(self.requests) < self.max_requests:
+                    # Có slot, thêm request và return
+                    self.requests.append(now)
+                    
+                    # Log progress occasionally
+                    if len(self.requests) % 3 == 0:
+                        thread_id = threading.current_thread().ident
+                        throttle_info = f" (throttled {self.throttle_factor:.1%})" if self.throttle_factor < 1.0 else ""
+                        print(f"📊 Thread {thread_id}: {len(self.requests)}/{self.max_requests} requests{throttle_info}")
+                    
+                    return  # Success!
+                
+                # Không có slot, tính wait time
                 oldest_request = self.requests[0]
                 wait_time = (oldest_request + timedelta(seconds=self.window_seconds) - now).total_seconds()
+            
+            # Sleep NGOÀI lock với distributed timing
+            if wait_time > 0:
+                # Distributed sleep: mỗi thread sleep khác nhau để tránh thundering herd
+                thread_id = threading.current_thread().ident or 0
+                jitter = (thread_id % 1000) / 1000.0  # 0-1 second jitter
+                actual_sleep = min(wait_time / 2 + jitter, 2.0)  # Max 2s sleep
                 
-                if wait_time > 0:
-                    print(f"🚦 Rate limit: {len(self.requests)}/{self.max_requests} requests. Đợi {wait_time:.1f}s...")
-                    time.sleep(wait_time + 0.1)  # Thêm 0.1s buffer
-                    
-                    # Xóa lại các requests cũ sau khi đợi
-                    now = datetime.now()
-                    cutoff_time = now - timedelta(seconds=self.window_seconds)
-                    while self.requests and self.requests[0] < cutoff_time:
-                        self.requests.popleft()
+                if attempt == 0:  # Chỉ log lần đầu
+                    print(f"🚦 Thread {thread_id}: Rate limit, đợi {actual_sleep:.1f}s...")
+                
+                time.sleep(actual_sleep)
+            else:
+                # Ngắn sleep để tránh busy waiting
+                time.sleep(0.1)
             
-            # Thêm request hiện tại
-            self.requests.append(now)
-            current_count = len(self.requests)
-            if current_count % 5 == 0:  # Log mỗi 5 requests
-                print(f"📊 Rate limiter: {current_count}/{self.max_requests} requests trong 60s")
+            attempt += 1
+        
+        # Fallback: nếu không get được slot sau max_attempts
+        print(f"⚠️ Thread {threading.current_thread().ident}: Fallback acquire after {max_attempts} attempts")
+        with self.lock:
+            self.requests.append(datetime.now())
     
-    def get_current_usage(self):
-        """Get current number of requests in the window"""
+    def _calculate_wait_time(self):
+        """Tính wait time mà không block threads khác"""
         with self.lock:
             now = datetime.now()
-            cutoff_time = now - timedelta(seconds=self.window_seconds)
-            
-            # Xóa các requests cũ
-            while self.requests and self.requests[0] < cutoff_time:
-                self.requests.popleft()
-            
-            return len(self.requests)
-    
-    def get_wait_time(self):
-        """Get time to wait before next request is allowed"""
-        with self.lock:
-            now = datetime.now()
-            cutoff_time = now - timedelta(seconds=self.window_seconds)
-            
-            # Xóa các requests cũ
-            while self.requests and self.requests[0] < cutoff_time:
-                self.requests.popleft()
+            self._cleanup_old_requests(now)
             
             if len(self.requests) < self.max_requests:
                 return 0
@@ -98,6 +113,79 @@ class RateLimiter:
             oldest_request = self.requests[0]
             wait_time = (oldest_request + timedelta(seconds=self.window_seconds) - now).total_seconds()
             return max(0, wait_time)
+    
+    def _cleanup_old_requests(self, now):
+        """Xóa các requests cũ ngoài window"""
+        cutoff_time = now - timedelta(seconds=self.window_seconds)
+        while self.requests and self.requests[0] < cutoff_time:
+            self.requests.popleft()
+    
+    def get_current_usage(self):
+        """Get current number of requests in the window"""
+        with self.lock:
+            now = datetime.now()
+            self._cleanup_old_requests(now)
+            return len(self.requests)
+    
+    def get_wait_time(self):
+        """Get time to wait before next request is allowed"""
+        return self._calculate_wait_time()
+    
+    def on_rate_limit_error(self):
+        """Gọi khi gặp rate limit error để adaptive throttling"""
+        with self.lock:
+            self.consecutive_errors += 1
+            self.last_error_time = datetime.now()
+            
+            # Giảm throttle factor
+            if self.consecutive_errors == 1:
+                self.throttle_factor = 0.8  # Giảm 20%
+            elif self.consecutive_errors == 2:
+                self.throttle_factor = 0.6  # Giảm 40%
+            elif self.consecutive_errors >= 3:
+                self.throttle_factor = self.min_throttle  # Giảm xuống minimum
+            
+            # Cập nhật max_requests
+            old_max = self.max_requests
+            self.max_requests = max(1, int(self.base_max_requests * self.throttle_factor))
+            
+            print(f"🚨 Rate limit error #{self.consecutive_errors}!")
+            print(f"   📉 Throttling: {old_max} → {self.max_requests} RPM ({self.throttle_factor:.1%})")
+    
+    def on_success(self):
+        """Gọi khi request thành công để recovery throttling"""
+        with self.lock:
+            if self.consecutive_errors > 0:
+                # Chỉ recovery sau 30s không có lỗi
+                if self.last_error_time and (datetime.now() - self.last_error_time).total_seconds() > 30:
+                    self.consecutive_errors = max(0, self.consecutive_errors - 1)
+                    
+                    # Tăng dần throttle factor
+                    if self.consecutive_errors == 0:
+                        self.throttle_factor = min(self.max_throttle, self.throttle_factor + 0.1)
+                    
+                    # Cập nhật max_requests
+                    old_max = self.max_requests
+                    self.max_requests = max(1, int(self.base_max_requests * self.throttle_factor))
+                    
+                    if old_max != self.max_requests:
+                        print(f"📈 Recovery throttling: {old_max} → {self.max_requests} RPM ({self.throttle_factor:.1%})")
+    
+    def get_stats(self):
+        """Get rate limiter statistics"""
+        with self.lock:
+            return {
+                'current_usage': len(self.requests),
+                'max_requests': self.max_requests,
+                'base_max_requests': self.base_max_requests,
+                'throttle_factor': self.throttle_factor,
+                'consecutive_errors': self.consecutive_errors,
+                'utilization': len(self.requests) / self.max_requests if self.max_requests > 0 else 0
+            }
+
+
+# Backward compatibility alias
+RateLimiter = MultiThreadRateLimiter
 
 
 # Rate limiters cho các models Google AI khác nhau
@@ -112,7 +200,7 @@ def _get_key_hash(api_key: str) -> str:
     return hashlib.md5(api_key.encode()).hexdigest()[:8]
 
 
-def get_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str = None) -> RateLimiter:
+def get_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str = None) -> MultiThreadRateLimiter:
     """
     Get hoặc tạo rate limiter cho model (và key cụ thể nếu có)
     
@@ -165,7 +253,7 @@ def get_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str 
             print(f"   🛡️ Giới hạn an toàn: {safe_rpm} RPM (80% của gốc)")
             print(f"   🌐 Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits")
             
-            _rate_limiters[limiter_key] = RateLimiter(requests_per_minute=safe_rpm)
+            _rate_limiters[limiter_key] = MultiThreadRateLimiter(requests_per_minute=safe_rpm)
         
         return _rate_limiters[limiter_key]
 

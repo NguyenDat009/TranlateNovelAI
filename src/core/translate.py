@@ -10,10 +10,10 @@ from itertools import cycle
 
 # Import rate limiter for Google AI
 try:
-    from .rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error
+    from .rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
 except ImportError:
     try:
-        from rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error
+        from rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
     except ImportError:
         print("⚠️ Rate limiter module not found")
         def get_rate_limiter(*args, **kwargs):
@@ -22,15 +22,18 @@ except ImportError:
             time.sleep(min(base_delay * (2 ** retry_count), max_delay))
         def is_rate_limit_error(error_message):
             return "429" in str(error_message).lower() or "rate limit" in str(error_message).lower()
+        def _get_key_hash(api_key):
+            import hashlib
+            return hashlib.md5(api_key.encode()).hexdigest()[:8]
 
 # Import reformat function
 try:
     from .reformat import fix_text_format
     CAN_REFORMAT = True
-    print("✅ Đã import thành công chức năng reformat")
+    print("Da import thanh cong chuc nang reformat")
 except ImportError:
     CAN_REFORMAT = False
-    print("⚠️ Không thể import reformat.py - chức năng reformat sẽ bị tắt")
+    print("Khong the import reformat.py - chuc nang reformat se bi tat")
 
 # --- CẤU HÌNH CÁC HẰNG SỐ ---
 MAX_RETRIES_ON_SAFETY_BLOCK = 5
@@ -234,13 +237,13 @@ def get_optimal_threads():
         # - Formula: min(max(cpu_cores * 2, 4), 20)
         optimal_threads = min(max(cpu_cores * 2, 4), 20)
         
-        print(f"🖥️ Phát hiện {cpu_cores} CPU cores")
-        print(f"🔧 Threads tối ưu được đề xuất: {optimal_threads}")
+        print(f"Phat hien {cpu_cores} CPU cores")
+        print(f"Threads toi uu duoc de xuat: {optimal_threads}")
         
         return optimal_threads
         
     except Exception as e:
-        print(f"⚠️ Lỗi khi phát hiện CPU cores: {e}")
+        print(f"Loi khi phat hien CPU cores: {e}")
         return 10  # Default fallback
 
 def validate_threads(num_threads):
@@ -549,9 +552,9 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                 rate_limit_retry = 0
                 while rate_limit_retry <= MAX_RETRIES_ON_RATE_LIMIT:
                     try:
-                        # Rate limit cho Google AI - PHẢI GỌI TRONG RETRY LOOP
+                        # Rate limit cho Google AI - Multi-threading safe
                         if rate_limiter and use_google_ai:
-                            rate_limiter.acquire()  # Block nếu vượt quá rate limit
+                            rate_limiter.acquire()  # Non-blocking multi-thread acquire
                         
                         if use_google_ai:
                             # Gom các dòng thành một chuỗi lớn để gửi đi
@@ -579,6 +582,10 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                                 is_safety_blocked = False
                                 is_bad = is_bad_translation(translated_text)
                             
+                            # Báo success cho adaptive throttling
+                            if rate_limiter:
+                                rate_limiter.on_success()
+                            
                             break  # Success, thoát khỏi rate limit retry loop
                                 
                         elif use_openrouter:
@@ -595,6 +602,11 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                         if is_rate_limit_error(error_msg) and rate_limit_retry < MAX_RETRIES_ON_RATE_LIMIT:
                             rate_limit_retry += 1
                             print(f"⚠️ Rate limit error ở chunk {chunk_index}, retry {rate_limit_retry}/{MAX_RETRIES_ON_RATE_LIMIT}")
+                            
+                            # Báo rate limit error cho adaptive throttling
+                            if rate_limiter and use_google_ai:
+                                rate_limiter.on_rate_limit_error()
+                            
                             exponential_backoff_sleep(rate_limit_retry - 1, base_delay=5.0)
                             continue
                         else:
@@ -699,23 +711,41 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     else:
         num_workers = validate_threads(num_workers)
     
-    # Giới hạn threads cho Google AI để tránh rate limit
+    # Tính toán threads cho Google AI dựa trên số lượng keys
     if provider == "Google AI":
-        # Xác định max threads dựa trên model
+        # Xác định base RPM dựa trên model
         if "1.5-pro" in model_name.lower():
-            max_threads_google = 1  # Pro model có RPM rất thấp (2 RPM)
+            base_rpm = 2  # Pro model có RPM rất thấp
+            base_threads = 1
         elif "2.0-flash" in model_name.lower() or "2.0flash" in model_name.lower():
-            max_threads_google = 2  # 10 RPM / 5 = 2 threads safe
+            base_rpm = 10
+            base_threads = 2
         elif "1.5-flash" in model_name.lower() or "1.5flash" in model_name.lower():
-            max_threads_google = 3  # 15 RPM / 5 = 3 threads safe
+            base_rpm = 15
+            base_threads = 3
         else:
-            max_threads_google = 2  # Default safe
+            base_rpm = 10  # Default safe
+            base_threads = 2
+        
+        # Tính số keys để scale threads
+        num_keys = 1
+        if isinstance(api_key, list):
+            num_keys = len(api_key)
+        
+        # Scale threads dựa trên số keys (mỗi key có thể handle base_threads)
+        max_threads_google = min(base_threads * num_keys, 20)  # Cap tại 20 threads
         
         if num_workers > max_threads_google:
-            print(f"⚠️ Google AI Free Tier có giới hạn RPM thấp!")
-            print(f"⚠️ Tự động giảm threads từ {num_workers} → {max_threads_google} để tránh rate limit")
-            print(f"📊 Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits?hl=vi")
+            print(f"🔧 Google AI với {num_keys} keys:")
+            print(f"   📊 Base RPM: {base_rpm} × {num_keys} keys = {base_rpm * num_keys} RPM tổng")
+            print(f"   ⚡ Threads: {num_workers} → {max_threads_google} (tối ưu cho {num_keys} keys)")
+            print(f"   🌐 Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits?hl=vi")
             num_workers = max_threads_google
+        elif num_keys > 1:
+            print(f"🚀 Google AI Multi-Key Setup:")
+            print(f"   🔑 Keys: {num_keys} keys")
+            print(f"   📊 Total RPM: ~{base_rpm * num_keys} RPM")
+            print(f"   ⚡ Threads: {num_workers} (tối ưu cho multi-threading)")
         
     if chunk_size_lines is None:
         chunk_size_lines = CHUNK_SIZE_LINES
@@ -953,6 +983,19 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
             # Print key usage stats if using key rotator
             if key_rotator:
                 key_rotator.print_stats()
+            
+            # Print rate limiter stats for Google AI
+            if provider == "Google AI" and key_rotator:
+                print("\n📊 Rate Limiter Statistics:")
+                for i, key in enumerate(key_rotator.keys, 1):
+                    limiter = get_rate_limiter(model_name, provider, key)
+                    if limiter:
+                        stats = limiter.get_stats()
+                        key_display = f"key_***{_get_key_hash(key)}"
+                        print(f"   Key #{i} ({key_display}):")
+                        print(f"     Usage: {stats['current_usage']}/{stats['max_requests']} ({stats['utilization']:.1%})")
+                        print(f"     Throttle: {stats['throttle_factor']:.1%} (errors: {stats['consecutive_errors']})")
+                print()
 
             # Xóa file tiến độ khi hoàn thành
             if os.path.exists(progress_file_path):
