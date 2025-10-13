@@ -225,7 +225,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         
         self.version_label = ctk.CTkLabel(
             self.sidebar_frame,
-            text="Modern Edition v1.1.0 By DoLuPhi",
+            text="Modern Edition v1.2.0 By DoLuPhi",
             font=ctk.CTkFont(size=12)
         )
         self.version_label.grid(row=1, column=0, padx=20, pady=(0, 15), sticky="ew")
