@@ -18,8 +18,24 @@ except ImportError:
         print("⚠️ Rate limiter module not found")
         def get_rate_limiter(*args, **kwargs):
             return None
-        def exponential_backoff_sleep(retry_count, base_delay=1.0, max_delay=60.0):
-            time.sleep(min(base_delay * (2 ** retry_count), max_delay))
+        def exponential_backoff_sleep(retry_count, base_delay=2.0, max_delay=120.0):
+            """
+            Improved exponential backoff với jitter để tránh thundering herd
+            """
+            import random
+            
+            # Tính delay cơ bản với exponential backoff
+            delay = base_delay * (2 ** retry_count)
+            
+            # Thêm jitter (random factor) để tránh nhiều thread retry cùng lúc
+            jitter = random.uniform(0.1, 0.5)  # 10-50% jitter
+            delay = delay * (1 + jitter)
+            
+            # Giới hạn max delay
+            delay = min(delay, max_delay)
+            
+            print(f"💤 Exponential backoff: {delay:.1f}s (retry #{retry_count + 1})")
+            time.sleep(delay)
         def is_rate_limit_error(error_message):
             return "429" in str(error_message).lower() or "rate limit" in str(error_message).lower()
         def _get_key_hash(api_key):
@@ -38,10 +54,115 @@ except ImportError:
 # --- CẤU HÌNH CÁC HẰNG SỐ ---
 MAX_RETRIES_ON_SAFETY_BLOCK = 5
 MAX_RETRIES_ON_BAD_TRANSLATION = 5
-MAX_RETRIES_ON_RATE_LIMIT = 3  # Số lần retry khi gặp rate limit
+MAX_RETRIES_ON_RATE_LIMIT = 5  # Tăng số lần retry khi gặp rate limit để xử lý tốt hơn
 RETRY_DELAY_SECONDS = 2
 PROGRESS_FILE_SUFFIX = ".progress.json"
 CHUNK_SIZE = 1024 * 1024  # 1MB (Không còn dùng trực tiếp CHUNK_SIZE cho việc đọc file nữa)
+
+# --- ADAPTIVE THREAD SCALING ---
+class AdaptiveThreadManager:
+    """
+    Quản lý adaptive thread scaling - tự động điều chỉnh threads dựa trên rate limit
+    """
+    def __init__(self, initial_threads, min_threads=2, max_threads=50):
+        self.current_threads = initial_threads
+        self.initial_threads = initial_threads
+        self.min_threads = min_threads
+        self.max_threads = max_threads
+        
+        # Tracking rate limit
+        self.rate_limit_count = 0
+        self.total_requests = 0
+        self.successful_requests = 0
+        
+        # Scaling parameters
+        self.rate_limit_threshold = 0.3  # 30% rate limit triggers scaling down
+        self.scale_down_factor = 0.6     # Giảm 40% threads
+        self.scale_up_factor = 1.2       # Tăng 20% threads
+        self.min_requests_for_scaling = 20  # Tối thiểu requests để đánh giá
+        
+        # Cooldown để tránh oscillation
+        self.last_scale_time = 0
+        self.scale_cooldown = 30  # 30 giây cooldown
+        
+        import threading
+        self.lock = threading.Lock()
+        
+    def report_rate_limit(self):
+        """Báo cáo gặp rate limit"""
+        with self.lock:
+            self.rate_limit_count += 1
+            self.total_requests += 1
+            self._evaluate_scaling()
+    
+    def report_success(self):
+        """Báo cáo request thành công"""
+        with self.lock:
+            self.successful_requests += 1
+            self.total_requests += 1
+            self._evaluate_scaling()
+    
+    def report_other_error(self):
+        """Báo cáo lỗi khác (không phải rate limit)"""
+        with self.lock:
+            self.total_requests += 1
+    
+    def _evaluate_scaling(self):
+        """Đánh giá và thực hiện scaling nếu cần"""
+        import time
+        
+        # Chỉ đánh giá sau khi có đủ data
+        if self.total_requests < self.min_requests_for_scaling:
+            return
+            
+        # Kiểm tra cooldown
+        current_time = time.time()
+        if current_time - self.last_scale_time < self.scale_cooldown:
+            return
+        
+        # Tính rate limit ratio
+        rate_limit_ratio = self.rate_limit_count / self.total_requests
+        success_ratio = self.successful_requests / self.total_requests
+        
+        print(f"📊 Thread Manager Stats: Rate Limit: {rate_limit_ratio:.1%}, Success: {success_ratio:.1%}, Current Threads: {self.current_threads}")
+        
+        # Scale down nếu rate limit cao
+        if rate_limit_ratio > self.rate_limit_threshold and self.current_threads > self.min_threads:
+            new_threads = max(int(self.current_threads * self.scale_down_factor), self.min_threads)
+            if new_threads < self.current_threads:
+                self.current_threads = new_threads
+                self.last_scale_time = current_time
+                self._reset_stats()
+                print(f"🔻 SCALE DOWN: Giảm threads xuống {self.current_threads} do rate limit cao ({rate_limit_ratio:.1%})")
+                return True
+        
+        # Scale up nếu success rate cao và ít rate limit
+        elif rate_limit_ratio < 0.1 and success_ratio > 0.8 and self.current_threads < self.initial_threads:
+            new_threads = min(int(self.current_threads * self.scale_up_factor), self.initial_threads)
+            if new_threads > self.current_threads:
+                self.current_threads = new_threads
+                self.last_scale_time = current_time
+                self._reset_stats()
+                print(f"🔺 SCALE UP: Tăng threads lên {self.current_threads} do performance tốt")
+                return True
+                
+        return False
+    
+    def _reset_stats(self):
+        """Reset statistics sau khi scale"""
+        self.rate_limit_count = 0
+        self.total_requests = 0
+        self.successful_requests = 0
+    
+    def get_current_threads(self):
+        """Lấy số threads hiện tại"""
+        with self.lock:
+            return self.current_threads
+    
+    def should_restart_with_new_threads(self):
+        """Kiểm tra xem có cần restart với threads mới không"""
+        with self.lock:
+            return self.current_threads != self.initial_threads
 
 # Kích thước cửa sổ ngữ cảnh (số đoạn văn bản trước đó dùng làm ngữ cảnh)
 CONTEXT_WINDOW_SIZE = 5
@@ -138,29 +259,103 @@ def is_quota_exceeded():
     global _quota_exceeded
     return _quota_exceeded.is_set()
 
-def check_quota_error(error_message):
-    """Kiểm tra xem có phải lỗi quota exceeded không"""
+def check_openrouter_rate_limit_error(error_message):
+    """Kiểm tra lỗi Rate Limit (429) - có thể retry"""
+    error_str = str(error_message).lower()
+    rate_limit_keywords = [
+        "rate limit exceeded",
+        "rate_limit_exceeded", 
+        "429",
+        "too many requests",
+        "requests per minute",
+        "requests per second"
+    ]
+    return any(keyword in error_str for keyword in rate_limit_keywords)
+
+def check_openrouter_quota_error(error_message):
+    """Kiểm tra lỗi Quota/Credit Insufficient (402) - cần nạp credit"""
     error_str = str(error_message).lower()
     quota_keywords = [
-        "429",
-        "exceeded your current quota",
-        "quota exceeded", 
-        "rate limit",
+        "402",
+        "insufficient credits",
+        "insufficient_credits",
+        "exceeded your current quota", 
+        "quota exceeded",
         "billing",
-        "please check your plan"
+        "please check your plan",
+        "credits",
+        "balance"
     ]
-    
+    # KHÔNG BAO GỒM "429" và "rate limit" - đó là lỗi khác!
     return any(keyword in error_str for keyword in quota_keywords)
 
-def check_api_key_error(error_message):
-    """Kiểm tra xem lỗi có phải là API key không hợp lệ không"""
+def check_openrouter_api_key_error(error_message):
+    """Kiểm tra lỗi API Key không hợp lệ (401)"""
     error_str = str(error_message).lower()
     api_key_keywords = [
-        "api key not valid", "invalid api key", "unauthorized", "authentication failed",
-        "api_key_invalid", "invalid_api_key", "api key is invalid", "bad api key",
-        "400", "401", "403"
+        "401",
+        "unauthorized", 
+        "invalid credentials",
+        "invalid_credentials",
+        "api key not valid", 
+        "invalid api key", 
+        "authentication failed",
+        "api_key_invalid", 
+        "invalid_api_key", 
+        "api key is invalid", 
+        "bad api key"
     ]
     return any(keyword in error_str for keyword in api_key_keywords)
+
+def check_openrouter_moderation_error(error_message):
+    """Kiểm tra lỗi Moderation (403) - nội dung bị cấm"""
+    error_str = str(error_message).lower()
+    moderation_keywords = [
+        "403",
+        "moderation",
+        "content policy",
+        "content_policy",
+        "policy violation",
+        "blocked content",
+        "inappropriate content"
+    ]
+    return any(keyword in error_str for keyword in moderation_keywords)
+
+def check_openrouter_timeout_error(error_message):
+    """Kiểm tra lỗi Timeout (408) - có thể retry"""
+    error_str = str(error_message).lower()
+    timeout_keywords = [
+        "408",
+        "timeout",
+        "request timeout",
+        "gateway timeout",
+        "timed out"
+    ]
+    return any(keyword in error_str for keyword in timeout_keywords)
+
+def check_openrouter_service_error(error_message):
+    """Kiểm tra lỗi Service (502, 503) - có thể retry"""
+    error_str = str(error_message).lower()
+    service_keywords = [
+        "502",
+        "503", 
+        "bad gateway",
+        "service unavailable",
+        "server error",
+        "internal server error",
+        "model unavailable",
+        "provider unavailable"
+    ]
+    return any(keyword in error_str for keyword in service_keywords)
+
+# Legacy functions for backward compatibility
+def check_quota_error(error_message):
+    """Legacy function - sử dụng check_openrouter_quota_error thay thế"""
+    return check_openrouter_quota_error(error_message)
+
+def check_api_key_error(error_message):
+    """Legacy function - sử dụng check_openrouter_api_key_error thay thế"""
+    return check_openrouter_api_key_error(error_message)
 
 def validate_api_key_before_translation(api_key, model_name, provider="OpenRouter"):
     """Validate API key trước khi bắt đầu translation"""
@@ -210,9 +405,15 @@ def validate_api_key_before_translation(api_key, model_name, provider="OpenRoute
             if response.status_code == 200:
                 return True, "OpenRouter API key hợp lệ"
             elif response.status_code == 401:
-                return False, "OpenRouter API Key không hợp lệ hoặc đã hết hạn"
+                return False, "OpenRouter API Key không hợp lệ (401: Invalid Credentials)"
             elif response.status_code == 402:
-                return False, "Tài khoản OpenRouter hết credit"
+                return False, "Tài khoản OpenRouter hết credit (402: Insufficient Credits)"
+            elif response.status_code == 403:
+                return False, "OpenRouter API bị chặn (403: Moderation Error)"
+            elif response.status_code == 429:
+                return False, "OpenRouter API bị rate limit (429: Too Many Requests) - thử lại sau"
+            elif response.status_code in [502, 503]:
+                return False, f"OpenRouter service tạm thời lỗi ({response.status_code}) - thử lại sau"
             else:
                 return False, f"Lỗi OpenRouter API: HTTP {response.status_code}"
         else:
@@ -487,11 +688,12 @@ def is_bad_translation(text, input_text=None):
     
     return False
 
-def translate_chunk(model, chunk_lines, context="modern"):
+def translate_chunk(model, chunk_lines, system_instruction, context="modern"):
     """
     Dịch một chunk gồm nhiều dòng văn bản.
     chunk_lines: danh sách các dòng văn bản
     context: "modern" (hiện đại) hoặc "ancient" (cổ đại)
+    system_instruction: Chỉ dẫn hệ thống đầy đủ từ GUI
     Trả về (translated_text, is_safety_blocked_flag, is_bad_translation_flag).
     """
     # Gom các dòng thành một chuỗi lớn để gửi đi
@@ -502,54 +704,10 @@ def translate_chunk(model, chunk_lines, context="modern"):
         return ("", False, False) # Trả về chuỗi rỗng, không bị chặn, không bad translation
 
     try:
-        # Tạo prompt khác nhau cho từng bối cảnh
-        if context == "ancient":
-            # Prompt cho bối cảnh cổ đại
-            prompt = f"""Dịch đoạn văn bản sau sang tiếng Việt theo phong cách CỔ ĐẠI:
-
-QUY TẮC DANH XƯNG CỔ ĐẠI:
-- NGƯỜI KỂ CHUYỆN (narrator) LUÔN xưng "ta" - KHÔNG BAO GIỜ dùng "tôi", "thần", "hạ thần"
-- KHÔNG dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị"
-- Lời thoại nhân vật trong "..." có thể dùng: ta/ngươi, hạ thần/thần tử, công tử/tiểu thư
-
-PHONG CÁCH CỔ ĐẠI:
-- Ngôn ngữ trang trọng, lịch thiệp
-- Thuật ngữ võ thuật: công pháp, tâm pháp, tu vi, cảnh giới
-- Chức vị: hoàng thượng, hoàng hậu, thái tử, đại thần
-- Từ Hán Việt khi phù hợp
-
-QUAN TRỌNG - OUTPUT:
-- CHỈ trả về nội dung đã dịch
-- KHÔNG thêm giải thích, phân tích, bình luận
-- KHÔNG thêm "Bản dịch:", "Kết quả:", hay bất kỳ tiêu đề nào
-- KHÔNG thêm ghi chú hay chú thích
-
-VĂN BẢN CẦN DỊCH:
-{full_text_to_translate}"""
-        else:
-            # Prompt cho bối cảnh hiện đại
-            prompt = f"""Dịch đoạn văn bản sau sang tiếng Việt theo phong cách HIỆN ĐẠI:
-
-QUY TẮC DANH XƯNG HIỆN ĐẠI:
-- NGƯỜI KỂ CHUYỆN (narrator) LUÔN xưng "tôi" - KHÔNG BAO GIỜ dùng "ta", "ba", "bố", "con"
-- KHÔNG dịch người kể chuyện thành danh xưng quan hệ
-- Lời thoại nhân vật trong "..." có thể dùng: anh/chị, em, bạn, ba/mẹ, con
-
-PHONG CÁCH HIỆN ĐẠI:
-- Ngôn ngữ tự nhiên, gần gũi
-- Thuật ngữ công nghệ, đời sống đô thị
-- Giữ từ ngữ thô tục, slang nếu có
-- Không quá trang trọng
-
-QUAN TRỌNG - OUTPUT:
-- CHỈ trả về nội dung đã dịch
-- KHÔNG thêm giải thích, phân tích, bình luận
-- KHÔNG thêm "Bản dịch:", "Kết quả:", hay bất kỳ tiêu đề nào
-- KHÔNG thêm ghi chú hay chú thích
-
-VĂN BẢN CẦN DỊCH:
-{full_text_to_translate}"""
-
+        # Sử dụng system_instruction được truyền vào và thêm văn bản cần dịch
+        # Điều này đảm bảo prompt từ GUI được sử dụng
+        prompt = f"{system_instruction}\n\n{full_text_to_translate}"
+        
         response = model.generate_content(
             contents=[{
                 "role": "user",
@@ -660,9 +818,23 @@ def load_progress_with_info(progress_file_path):
             return {'completed_chunks': 0}
     return {'completed_chunks': 0}
 
-def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None, context="modern", is_paid_key=False):
+def split_large_chunk(chunk_lines, max_lines=50):
     """
-    Xử lý dịch một chunk với retry logic và rate limiting.
+    Chia một chunk lớn thành các chunks nhỏ hơn khi gặp lỗi context length exceeded
+    """
+    if len(chunk_lines) <= max_lines:
+        return [chunk_lines]
+    
+    sub_chunks = []
+    for i in range(0, len(chunk_lines), max_lines):
+        sub_chunk = chunk_lines[i:i + max_lines]
+        sub_chunks.append(sub_chunk)
+    
+    return sub_chunks
+
+def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None, context="modern", is_paid_key=False, adaptive_thread_manager=None):
+    """
+    Xử lý dịch một chunk với retry logic, rate limiting và re-chunking.
     chunk_data: tuple (chunk_index, chunk_lines, chunk_start_line_index)
     Trả về: (chunk_index, translated_text, lines_count, line_range)
     
@@ -757,17 +929,26 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                             rate_limiter.acquire()  # Non-blocking multi-thread acquire
                         
                         if use_google_ai:
-                            # Dịch với Google AI sử dụng hàm translate_chunk với context
-                            translated_text, is_safety_blocked, is_bad = translate_chunk(model, chunk_lines, context)
+                            # Dịch với Google AI sử dụng hàm translate_chunk với system_instruction đầy đủ
+                            translated_text, is_safety_blocked, is_bad = translate_chunk(model, chunk_lines, system_instruction, context)
                             
                             # Báo success cho adaptive throttling
                             if rate_limiter:
                                 rate_limiter.on_success()
                             
+                            # Báo success cho adaptive thread manager
+                            if adaptive_thread_manager:
+                                adaptive_thread_manager.report_success()
+                            
                             break  # Success, thoát khỏi rate limit retry loop
                                 
                         elif use_openrouter:
                             translated_text, is_safety_blocked, is_bad = openrouter_translate_chunk(api_key, model_name, system_instruction, chunk_lines, context)
+                            
+                            # Báo success cho adaptive thread manager
+                            if adaptive_thread_manager:
+                                adaptive_thread_manager.report_success()
+                            
                             break  # Success, thoát khỏi rate limit retry loop
                         else:
                             error_text = format_error_chunk("PROVIDER ERROR", f"Provider không được hỗ trợ: {provider}", chunk_lines, line_range)
@@ -779,16 +960,25 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                         # Kiểm tra nếu là rate limit error
                         if is_rate_limit_error(error_msg) and rate_limit_retry < MAX_RETRIES_ON_RATE_LIMIT:
                             rate_limit_retry += 1
-                            print(f"⚠️ Rate limit error ở chunk {chunk_index}, retry {rate_limit_retry}/{MAX_RETRIES_ON_RATE_LIMIT}")
+                            print(f"🔄 Rate limit error ở chunk {chunk_index}, retry {rate_limit_retry}/{MAX_RETRIES_ON_RATE_LIMIT}")
+                            print(f"📝 Error detail: {error_msg[:200]}...")  # Log chi tiết lỗi
                             
                             # Báo rate limit error cho adaptive throttling
                             if rate_limiter and use_google_ai:
                                 rate_limiter.on_rate_limit_error()
                             
-                            exponential_backoff_sleep(rate_limit_retry - 1, base_delay=5.0)
+                            # Báo rate limit cho adaptive thread manager
+                            if adaptive_thread_manager:
+                                adaptive_thread_manager.report_rate_limit()
+                            
+                            # Sử dụng exponential backoff tốt hơn với base delay cao hơn cho rate limit
+                            exponential_backoff_sleep(rate_limit_retry - 1, base_delay=8.0, max_delay=300.0)
                             continue
                         else:
                             # Không phải rate limit error hoặc hết retry
+                            # Báo lỗi khác cho adaptive thread manager
+                            if adaptive_thread_manager:
+                                adaptive_thread_manager.report_other_error()
                             raise  # Re-raise để xử lý ở catch block bên ngoài
                 
                 # Kiểm tra quota exceeded sau khi dịch
@@ -818,16 +1008,69 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
             except Exception as e:
                 error_msg = str(e)
                 
-                # Kiểm tra quota error
-                if check_quota_error(error_msg):
+                # Kiểm tra từng loại lỗi OpenRouter cụ thể
+                if check_openrouter_quota_error(error_msg):
+                    # 402: Insufficient Credits - dừng hoàn toàn
                     set_quota_exceeded()
-                    error_text = format_error_chunk("API HẾT QUOTA", f"API quota exceeded: {error_msg}", chunk_lines, line_range)
+                    error_text = format_error_chunk("API HẾT QUOTA", f"OpenRouter hết credit (402): {error_msg}", chunk_lines, line_range)
                     return (chunk_index, error_text, len(chunk_lines), line_range)
                 
-                # Kiểm tra API key error
-                if check_api_key_error(error_msg):
-                    error_text = format_error_chunk("API KEY ERROR", f"API key không hợp lệ: {error_msg}", chunk_lines, line_range)
+                elif check_openrouter_api_key_error(error_msg):
+                    # 401: Invalid Credentials - dừng hoàn toàn
+                    error_text = format_error_chunk("API KEY ERROR", f"API key không hợp lệ (401): {error_msg}", chunk_lines, line_range)
                     return (chunk_index, error_text, len(chunk_lines), line_range)
+                
+                elif check_openrouter_rate_limit_error(error_msg):
+                    # 429: Rate Limit - có thể retry
+                    print(f"⚠️ Rate limit (429) tại chunk {chunk_index}, sẽ retry...")
+                    # Để tiếp tục retry loop thay vì return ngay
+                    continue
+                
+                elif check_openrouter_moderation_error(error_msg):
+                    # 403: Moderation - content bị block
+                    error_text = format_error_chunk("MODERATION ERROR", f"Nội dung vi phạm chính sách (403): {error_msg}", chunk_lines, line_range)
+                    return (chunk_index, error_text, len(chunk_lines), line_range)
+                
+                elif check_openrouter_timeout_error(error_msg):
+                    # 408: Timeout - có thể retry
+                    print(f"⚠️ Timeout (408) tại chunk {chunk_index}, sẽ retry...")
+                    continue
+                
+                elif check_openrouter_service_error(error_msg):
+                    # 502, 503: Service errors - có thể retry
+                    print(f"⚠️ Service error (502/503) tại chunk {chunk_index}, sẽ retry...")
+                    continue
+                
+                # Kiểm tra context length error và thử re-chunking
+                if ("context_length" in error_msg.lower() or 
+                    "too long" in error_msg.lower() or 
+                    "maximum context" in error_msg.lower()) and len(chunk_lines) > 10:
+                    
+                    print(f"🔄 Chunk {chunk_index} quá lớn, đang chia nhỏ để thử lại...")
+                    
+                    # Chia chunk thành các sub-chunks nhỏ hơn
+                    sub_chunks = split_large_chunk(chunk_lines, max_lines=max(10, len(chunk_lines) // 2))
+                    combined_result = ""
+                    
+                    for i, sub_chunk in enumerate(sub_chunks):
+                        try:
+                            if use_google_ai:
+                                translated_sub, _, is_bad_sub = translate_chunk(model, sub_chunk, system_instruction, context)
+                            elif use_openrouter:
+                                translated_sub, _, is_bad_sub = openrouter_translate_chunk(api_key, model_name, system_instruction, sub_chunk, context)
+                            
+                            if not is_bad_sub:
+                                combined_result += translated_sub
+                                if not translated_sub.endswith('\n'):
+                                    combined_result += '\n'
+                            else:
+                                combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Sub-chunk {i+1} failed", sub_chunk, f"sub-{i+1}")
+                                
+                        except Exception as sub_e:
+                            print(f"⚠️ Sub-chunk {i+1} cũng lỗi: {sub_e}")
+                            combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Sub-chunk {i+1} error: {str(sub_e)}", sub_chunk, f"sub-{i+1}")
+                    
+                    return (chunk_index, combined_result, len(chunk_lines), line_range)
                 
                 # Lỗi khác - lưu lại với nội dung gốc
                 error_text = format_error_chunk("API ERROR", f"Lỗi khi gọi API: {error_msg}", chunk_lines, line_range)
@@ -846,6 +1089,43 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
     # Fallback (không nên đến đây)
     error_text = format_error_chunk("UNKNOWN ERROR", "Không thể dịch chunk sau tất cả các lần thử", chunk_lines, line_range)
     return (chunk_index, error_text, len(chunk_lines), line_range)
+
+def retry_failed_chunks(input_file, output_file, progress_file_path, api_key, model_name, system_instruction, provider="OpenRouter", context="modern", is_paid_key=False):
+    """
+    Retry các chunks đã failed từ lần dịch trước
+    Trả về: số chunks đã retry thành công
+    """
+    if not os.path.exists(progress_file_path):
+        return 0
+    
+    try:
+        progress_data = load_progress_with_info(progress_file_path)
+        if 'last_error' not in progress_data:
+            return 0
+        
+        print("🔄 Đang retry các chunks bị lỗi từ lần dịch trước...")
+        
+        # Đọc file để tìm các chunks có error markers
+        with open(output_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Tìm các error chunks
+        error_pattern = r'\[\[LỖI.*?\]\]'
+        error_matches = re.findall(error_pattern, content, re.DOTALL)
+        
+        if not error_matches:
+            print("✅ Không tìm thấy chunks lỗi cần retry")
+            return 0
+        
+        print(f"📝 Tìm thấy {len(error_matches)} chunks cần retry")
+        
+        # TODO: Implement logic retry các chunks cụ thể
+        # Hiện tại chỉ return 0 để không break existing code
+        return 0
+        
+    except Exception as e:
+        print(f"⚠️ Lỗi khi retry failed chunks: {e}")
+        return 0
 
 def generate_output_filename(input_filepath):
     """
@@ -988,21 +1268,17 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     
     # System instruction cho AI - sử dụng custom hoặc default
     if system_instruction is None:
-        system_instruction = """Dịch văn bản sau sang tiếng Việt theo các quy tắc:
+        system_instruction = """NHIỆM VỤ: Dịch văn bản sang tiếng Việt hiện đại, tự nhiên.
 
-DANH XƯNG NGƯỜI KỂ CHUYỆN:
-- Người kể chuyện luôn xưng "tôi" (bối cảnh hiện đại) hoặc "ta" (bối cảnh cổ đại)
-- KHÔNG dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị"
+QUY TẮC QUAN TRỌNG:
+1. VĂN PHONG: Dịch như người Việt nói chuyện hàng ngày, tránh từ Hán Việt cứng nhắc
+2. NGƯỜI KỂ CHUYỆN: Luôn xưng "tôi" (hiện đại) hoặc "ta" (cổ đại). TUYỆT ĐỐI KHÔNG dùng "ba/bố/anh/chị/em/con"
+3. LỜI THOẠI: Đặt trong dấu ngoặc kép "...", xưng hô tự nhiên theo quan hệ nhân vật
+4. TỪNG NGỮ HIỆN ĐẠI: "Cảm thấy" thay vì "cảm nhận", "Anh ấy/Cô ấy" thay vì "Hắn/Nàng"
 
-QUY TẮC KHÁC:
-- Phân biệt lời kể và lời thoại nhân vật
-- Lời thoại trong dấu ngoặc kép "..."
-- Giữ nguyên chi tiết nội dung, từ ngữ thô tục
-- Danh xưng quan hệ chỉ dùng trong lời thoại nhân vật
+⚠️ QUAN TRỌNG: CHỈ TRẢ VỀ BẢN DỊCH, KHÔNG GIẢI THÍCH GÌ THÊM!
 
-OUTPUT:
-- CHỈ trả về nội dung đã dịch
-- KHÔNG thêm giải thích, bình luận, tiêu đề"""
+Văn bản cần dịch:"""
     
     print(f"🎯 System instruction: {system_instruction[:100]}...")  # Log first 100 chars
 
@@ -1031,209 +1307,228 @@ OUTPUT:
                 print(f"Đã xóa file tiến độ: {os.path.basename(progress_file_path)}")
             return True
 
+        # Tạo adaptive thread manager để quản lý threads động
+        adaptive_thread_manager = AdaptiveThreadManager(
+            initial_threads=num_workers,
+            min_threads=max(1, num_workers // 4),  # Tối thiểu 25% threads ban đầu
+            max_threads=num_workers * 2  # Tối đa 2x threads ban đầu
+        )
+        
         # Mở file output để ghi kết quả
         mode = 'a' if completed_chunks > 0 else 'w'  # Append nếu có tiến độ cũ, write nếu bắt đầu mới
         with open(output_file, mode, encoding='utf-8') as outfile:
             
-            # Dictionary để lưu trữ kết quả dịch theo thứ tự chunk index
-            translated_chunks_results = {}
-            next_expected_chunk_to_write = completed_chunks
-            total_lines_processed = completed_chunks * chunk_size_lines
+            # Loop chính với adaptive thread management
+            current_workers = num_workers
+            restart_needed = False
+            
+            while True:
+                print(f"🔧 Khởi động thread pool với {current_workers} workers...")
+                
+                # Dictionary để lưu trữ kết quả dịch theo thứ tự chunk index
+                translated_chunks_results = {}
+                next_expected_chunk_to_write = completed_chunks
+                total_lines_processed = completed_chunks * chunk_size_lines
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-                
-                futures = {} # Lưu trữ các future: {future_object: chunk_index}
-                
-                # Gửi các chunks cần dịch đến thread pool
-                chunks_to_process = chunks[completed_chunks:]  # Chỉ xử lý chunks chưa hoàn thành
-                
-                # Context đã được truyền từ GUI
-                print(f"🎯 Sử dụng context: {context} ({'hiện đại - tôi' if context == 'modern' else 'cổ đại - ta'})")
-                
-                print(f"Gửi {len(chunks_to_process)} chunks đến thread pool...")
-                
-                for chunk_data in chunks_to_process:
-                    # Kiểm tra flag dừng trước khi submit
-                    if is_translation_stopped():
-                        print("🛑 Dừng gửi chunks mới do người dùng yêu cầu")
-                        break
-                        
-                    # Submit với key_rotator và context
-                    future = executor.submit(process_chunk, api_key, model_name, system_instruction, chunk_data, provider, None, key_rotator, context, is_paid_key)
-                    futures[future] = chunk_data[0]  # chunk_index
-                
-                # Thu thập kết quả khi các threads hoàn thành
-                for future in concurrent.futures.as_completed(futures):
-                    # Kiểm tra flag dừng và quota exceeded
-                    if is_translation_stopped():
-                        if is_quota_exceeded():
-                            print("Dừng xử lý kết quả do API hết quota")
-                        else:
-                            print("🛑 Dừng xử lý kết quả do người dùng yêu cầu")
-                        
-                        # Hủy các future chưa hoàn thành
-                        for f in futures:
-                            if not f.done():
-                                f.cancel()
-                        break
-                        
-                    chunk_index = futures[future]
-                    try:
-                        result = future.result()  # (chunk_index, translated_text, lines_count, line_range)
-                        
-                        # Handle result với line info
-                        if len(result) == 4:  # New format with line_range
-                            processed_chunk_index, translated_text, lines_count, line_range = result
-                        else:  # Old format fallback
-                            processed_chunk_index, translated_text, lines_count = result
-                            # Tính toán line_range từ chunk data
-                            chunk_data = chunks[processed_chunk_index]
-                            start_line = chunk_data[2]
-                            line_range = f"{start_line + 1}:{start_line + len(chunk_data[1])}"
-                        
-                        # Check for errors
-                        if translated_text.startswith('[') and ('HẾT QUOTA' in translated_text or 'LỖI' in translated_text):
-                            # Lưu lỗi với line info
-                            error_info = {
-                                'message': translated_text,
-                                'chunk_index': processed_chunk_index,
-                                'line_range': line_range,
-                                'timestamp': time.time()
-                            }
-                            save_progress_with_line_info(progress_file_path, next_expected_chunk_to_write, None, error_info)
-                            print(f"❌ Lỗi tại chunk {processed_chunk_index + 1} (lines {line_range}): {translated_text}")
-                            # Continue processing other chunks
-                        
-                        # Lưu kết quả vào buffer tạm chờ ghi theo thứ tự
-                        translated_chunks_results[processed_chunk_index] = (translated_text, lines_count, line_range)
-                        
-                        print(f"✅ Hoàn thành chunk {processed_chunk_index + 1}/{total_chunks}")
-                        
-                        # Ghi các chunks đã hoàn thành vào file output theo đúng thứ tự
-                        while next_expected_chunk_to_write in translated_chunks_results:
-                            chunk_text, chunk_lines_count, chunk_line_range = translated_chunks_results.pop(next_expected_chunk_to_write)
-                            outfile.write(chunk_text)
-                            if not chunk_text.endswith('\n'):
-                                outfile.write('\n')
-                            outfile.flush()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=current_workers) as executor:
+                    
+                    futures = {} # Lưu trữ các future: {future_object: chunk_index}
+                    
+                    # Gửi các chunks cần dịch đến thread pool
+                    chunks_to_process = chunks[completed_chunks:]  # Chỉ xử lý chunks chưa hoàn thành
+                    
+                    # Context đã được truyền từ GUI
+                    print(f"🎯 Sử dụng context: {context} ({'hiện đại - tôi' if context == 'modern' else 'cổ đại - ta'})")
+                    
+                    print(f"Gửi {len(chunks_to_process)} chunks đến thread pool...")
+                    
+                    for chunk_data in chunks_to_process:
+                        # Kiểm tra flag dừng trước khi submit
+                        if is_translation_stopped():
+                            print("🛑 Dừng gửi chunks mới do người dùng yêu cầu")
+                            break
                             
-                            # Cập nhật tiến độ
-                            next_expected_chunk_to_write += 1
-                            total_lines_processed += chunk_lines_count
+                        # Submit với key_rotator, context và adaptive_thread_manager
+                        future = executor.submit(process_chunk, api_key, model_name, system_instruction, chunk_data, provider, None, key_rotator, context, is_paid_key, adaptive_thread_manager)
+                        futures[future] = chunk_data[0]  # chunk_index
+                    
+                    # Thu thập kết quả khi các threads hoàn thành
+                    for future in concurrent.futures.as_completed(futures):
+                        # Kiểm tra flag dừng và quota exceeded
+                        if is_translation_stopped():
+                            if is_quota_exceeded():
+                                print("Dừng xử lý kết quả do API hết quota")
+                            else:
+                                print("🛑 Dừng xử lý kết quả do người dùng yêu cầu")
                             
-                            # Lưu tiến độ sau mỗi chunk hoàn thành với line info
-                            current_chunk_info = {
-                                'chunk_index': next_expected_chunk_to_write - 1,
-                                'line_range': chunk_line_range,
-                                'lines_count': chunk_lines_count
-                            }
-                            save_progress_with_line_info(progress_file_path, next_expected_chunk_to_write, current_chunk_info)
+                            # Hủy các future chưa hoàn thành
+                            for f in futures:
+                                if not f.done():
+                                    f.cancel()
+                            break
                             
-                            # Hiển thị thông tin tiến độ
-                            current_time = time.time()
-                            elapsed_time = current_time - start_time
-                            progress_percent = (next_expected_chunk_to_write / total_chunks) * 100
-                            avg_speed = total_lines_processed / elapsed_time if elapsed_time > 0 else 0
-                            
-                            print(f"Tiến độ: {next_expected_chunk_to_write}/{total_chunks} chunks ({progress_percent:.1f}%) - {avg_speed:.1f} dòng/giây")
-                            
-                    except Exception as e:
-                        print(f"❌ Lỗi khi xử lý chunk {chunk_index}: {e}")
-                
-                # Ghi nốt các chunks còn sót lại trong buffer (nếu có)
-                if translated_chunks_results:
-                    print("⚠️ Ghi các chunks còn sót lại...")
-                    sorted_remaining_chunks = sorted(translated_chunks_results.items())
-                    for chunk_idx, chunk_data in sorted_remaining_chunks:
+                        chunk_index = futures[future]
                         try:
-                            if len(chunk_data) == 3:  # New format with line_range
-                                chunk_text, chunk_lines_count, chunk_line_range = chunk_data
+                            result = future.result()  # (chunk_index, translated_text, lines_count, line_range)
+                            
+                            # Handle result với line info
+                            if len(result) == 4:  # New format with line_range
+                                processed_chunk_index, translated_text, lines_count, line_range = result
                             else:  # Old format fallback
-                                chunk_text, chunk_lines_count = chunk_data
-                                chunk_line_range = f"unknown"
+                                processed_chunk_index, translated_text, lines_count = result
+                                # Tính toán line_range từ chunk data
+                                chunk_data = chunks[processed_chunk_index]
+                                start_line = chunk_data[2]
+                                line_range = f"{start_line + 1}:{start_line + len(chunk_data[1])}"
                             
-                            outfile.write(chunk_text)
-                            if not chunk_text.endswith('\n'):
-                                outfile.write('\n')
-                            outfile.flush()
-                            next_expected_chunk_to_write += 1
+                            # Check for errors
+                            if translated_text.startswith('[') and ('HẾT QUOTA' in translated_text or 'LỖI' in translated_text):
+                                # Lưu lỗi với line info
+                                error_info = {
+                                    'message': translated_text,
+                                    'chunk_index': processed_chunk_index,
+                                    'line_range': line_range,
+                                    'timestamp': time.time()
+                                }
+                                save_progress_with_line_info(progress_file_path, next_expected_chunk_to_write, None, error_info)
+                                print(f"❌ Lỗi tại chunk {processed_chunk_index + 1} (lines {line_range}): {translated_text}")
+                                
+                                # Nếu là lỗi quota thì dừng ngay
+                                if 'HẾT QUOTA' in translated_text:
+                                    set_quota_exceeded()
+                                    break
+                                # Các lỗi khác vẫn lưu vào buffer để ghi (với error message)
                             
-                            # Lưu progress với line info
-                            current_chunk_info = {
-                                'chunk_index': chunk_idx,
-                                'line_range': chunk_line_range,
-                                'lines_count': chunk_lines_count
-                            }
-                            save_progress_with_line_info(progress_file_path, next_expected_chunk_to_write, current_chunk_info)
-                            print(f"✅ Ghi chunk bị sót: {chunk_idx + 1} (lines {chunk_line_range})")
+                            # Lưu kết quả vào buffer tạm chờ ghi theo thứ tự (bao gồm cả lỗi)
+                            translated_chunks_results[processed_chunk_index] = (translated_text, lines_count, line_range)
+                            
+                            print(f"✅ Hoàn thành chunk {processed_chunk_index + 1}/{total_chunks}")
+                            
+                            # Ghi các chunks đã hoàn thành vào file output theo đúng thứ tự
+                            while next_expected_chunk_to_write in translated_chunks_results:
+                                chunk_text, chunk_lines_count, chunk_line_range = translated_chunks_results.pop(next_expected_chunk_to_write)
+                                outfile.write(chunk_text)
+                                if not chunk_text.endswith('\n'):
+                                    outfile.write('\n')
+                                outfile.flush()
+                                
+                                # Cập nhật tiến độ
+                                next_expected_chunk_to_write += 1
+                                total_lines_processed += chunk_lines_count
+                                
+                                # Lưu tiến độ sau mỗi chunk hoàn thành với line info
+                                current_chunk_info = {
+                                    'chunk_index': next_expected_chunk_to_write - 1,
+                                    'line_range': chunk_line_range,
+                                    'lines_count': chunk_lines_count
+                                }
+                                save_progress_with_line_info(progress_file_path, next_expected_chunk_to_write, current_chunk_info)
+                                
+                                # Hiển thị thông tin tiến độ
+                                current_time = time.time()
+                                elapsed_time = current_time - start_time
+                                progress_percent = (next_expected_chunk_to_write / total_chunks) * 100
+                                avg_speed = total_lines_processed / elapsed_time if elapsed_time > 0 else 0
+                                
+                                print(f"Tiến độ: {next_expected_chunk_to_write}/{total_chunks} chunks ({progress_percent:.1f}%) - {avg_speed:.1f} dòng/giây")
+                                
                         except Exception as e:
-                            print(f"❌ Lỗi khi ghi chunk {chunk_idx}: {e}")
+                            print(f"❌ Lỗi khi xử lý chunk {chunk_index}: {e}")
+                    
+                    # Ghi nốt các chunks còn sót lại trong buffer (nếu có)
+                    if translated_chunks_results:
+                        print("⚠️ Ghi các chunks còn sót lại...")
+                        sorted_remaining_chunks = sorted(translated_chunks_results.items())
+                        for chunk_idx, chunk_data in sorted_remaining_chunks:
+                            try:
+                                if len(chunk_data) == 3:  # New format with line_range
+                                    chunk_text, chunk_lines_count, chunk_line_range = chunk_data
+                                else:  # Old format fallback
+                                    chunk_text, chunk_lines_count = chunk_data
+                                    chunk_line_range = f"unknown"
+                                
+                                outfile.write(chunk_text)
+                                if not chunk_text.endswith('\n'):
+                                    outfile.write('\n')
+                                outfile.flush()
+                                next_expected_chunk_to_write += 1
+                                
+                                # Lưu progress với line info
+                                current_chunk_info = {
+                                    'chunk_index': chunk_idx,
+                                    'line_range': chunk_line_range,
+                                    'lines_count': chunk_lines_count
+                                }
+                                save_progress_with_line_info(progress_file_path, next_expected_chunk_to_write, current_chunk_info)
+                                print(f"✅ Ghi chunk bị sót: {chunk_idx + 1} (lines {chunk_line_range})")
+                            except Exception as e:
+                                print(f"❌ Lỗi khi ghi chunk {chunk_idx}: {e}")
 
-        # Kiểm tra xem có bị dừng giữa chừng không
-        if is_translation_stopped():
-            if is_quota_exceeded():
-                print(f"API đã hết quota!")
-                print(f"Để tiếp tục dịch, vui lòng:")
-                print(f" 1. Tạo tài khoản Google Cloud mới")
-                print(f" 2. Nhận 300$ credit miễn phí") 
-                print(f" 3. Tạo API key mới từ ai.google.dev")
-                print(f" 4. Cập nhật API key và tiếp tục dịch")
-                print(f"Đã xử lý {next_expected_chunk_to_write}/{total_chunks} chunks.")
-                print(f"Tiến độ đã được lưu để tiếp tục sau.")
-                return False
-            else:
-                print(f"🛑 Tiến trình dịch đã bị dừng bởi người dùng.")
-                print(f"Đã xử lý {next_expected_chunk_to_write}/{total_chunks} chunks.")
-                print(f"💾 Tiến độ đã được lưu. Bạn có thể tiếp tục dịch sau.")
-                return False
+            # Kiểm tra xem có bị dừng giữa chừng không
+            if is_translation_stopped():
+                if is_quota_exceeded():
+                    print(f"API đã hết quota!")
+                    print(f"Để tiếp tục dịch, vui lòng:")
+                    print(f" 1. Tạo tài khoản Google Cloud mới")
+                    print(f" 2. Nhận 300$ credit miễn phí") 
+                    print(f" 3. Tạo API key mới từ ai.google.dev")
+                    print(f" 4. Cập nhật API key và tiếp tục dịch")
+                    print(f"Đã xử lý {next_expected_chunk_to_write}/{total_chunks} chunks.")
+                    print(f"Tiến độ đã được lưu để tiếp tục sau.")
+                    return False
+                else:
+                    print(f"🛑 Tiến trình dịch đã bị dừng bởi người dùng.")
+                    print(f"Đã xử lý {next_expected_chunk_to_write}/{total_chunks} chunks.")
+                    print(f"💾 Tiến độ đã được lưu. Bạn có thể tiếp tục dịch sau.")
+                    return False
 
-        # Hoàn thành
-        total_time = time.time() - start_time
-        if next_expected_chunk_to_write >= total_chunks:
-            print(f"✅ Dịch hoàn thành file: {os.path.basename(input_file)}")
-            print(f"Đã dịch {total_chunks} chunks ({total_lines} dòng) trong {total_time:.2f}s")
-            print(f"Tốc độ trung bình: {total_lines / total_time:.2f} dòng/giây")
-            print(f"File dịch đã được lưu tại: {output_file}")
-            
-            # Print key usage stats if using key rotator
-            if key_rotator:
-                key_rotator.print_stats()
-            
-            # Print rate limiter stats for Google AI
-            if provider == "Google AI" and key_rotator:
-                print("\n📊 Rate Limiter Statistics:")
-                for i, key in enumerate(key_rotator.keys, 1):
-                    limiter = get_rate_limiter(model_name, provider, key)
-                    if limiter:
-                        stats = limiter.get_stats()
-                        key_display = f"key_***{_get_key_hash(key)}"
-                        print(f"   Key #{i} ({key_display}):")
-                        print(f"     Usage: {stats['current_usage']}/{stats['max_requests']} ({stats['utilization']:.1%})")
-                        print(f"     Throttle: {stats['throttle_factor']:.1%} (errors: {stats['consecutive_errors']})")
-                print()
+            # Hoàn thành
+            total_time = time.time() - start_time
+            if next_expected_chunk_to_write >= total_chunks:
+                print(f"✅ Dịch hoàn thành file: {os.path.basename(input_file)}")
+                print(f"Đã dịch {total_chunks} chunks ({total_lines} dòng) trong {total_time:.2f}s")
+                print(f"Tốc độ trung bình: {total_lines / total_time:.2f} dòng/giây")
+                print(f"File dịch đã được lưu tại: {output_file}")
+                
+                # Print key usage stats if using key rotator
+                if key_rotator:
+                    key_rotator.print_stats()
+                
+                # Print rate limiter stats for Google AI
+                if provider == "Google AI" and key_rotator:
+                    print("\n📊 Rate Limiter Statistics:")
+                    for i, key in enumerate(key_rotator.keys, 1):
+                        limiter = get_rate_limiter(model_name, provider, key)
+                        if limiter:
+                            stats = limiter.get_stats()
+                            key_display = f"key_***{_get_key_hash(key)}"
+                            print(f"   Key #{i} ({key_display}):")
+                            print(f"     Usage: {stats['current_usage']}/{stats['max_requests']} ({stats['utilization']:.1%})")
+                            print(f"     Throttle: {stats['throttle_factor']:.1%} (errors: {stats['consecutive_errors']})")
+                    print()
 
-            # Xóa file tiến độ khi hoàn thành
-            if os.path.exists(progress_file_path):
-                os.remove(progress_file_path)
-                print(f"Đã xóa file tiến độ: {os.path.basename(progress_file_path)}")
+                # Xóa file tiến độ khi hoàn thành
+                if os.path.exists(progress_file_path):
+                    os.remove(progress_file_path)
+                    print(f"Đã xóa file tiến độ: {os.path.basename(progress_file_path)}")
+                
+                # Tự động reformat file sau khi dịch xong
+                if CAN_REFORMAT:
+                    print("\n🔧 Bắt đầu reformat file đã dịch...")
+                    try:
+                        fix_text_format(output_file)
+                        print("✅ Reformat hoàn thành!")
+                    except Exception as e:
+                        print(f"⚠️ Lỗi khi reformat: {e}")
+                else:
+                    print("⚠️ Chức năng reformat không khả dụ")
+                
+                # Kết thúc ThreadPoolExecutor - hoàn thành
+                print(f"✅ Dịch hoàn thành!")
+                return True  # Exit function successfully
             
-            # Tự động reformat file sau khi dịch xong
-            if CAN_REFORMAT:
-                print("\n🔧 Bắt đầu reformat file đã dịch...")
-                try:
-                    fix_text_format(output_file)
-                    print("✅ Reformat hoàn thành!")
-                except Exception as e:
-                    print(f"⚠️ Lỗi khi reformat: {e}")
-            else:
-                print("⚠️ Chức năng reformat không khả dụng")
-            
-            return True
-        else:
-            print(f"⚠️ Quá trình dịch bị gián đoạn.")
-            print(f"Đã xử lý {next_expected_chunk_to_write}/{total_chunks} chunks.")
-            print(f"Tiến độ đã được lưu. Bạn có thể chạy lại chương trình để tiếp tục.")
-            return False
+        # Thoát khỏi adaptive loop khi hoàn thành
+        return True
 
     except FileNotFoundError:
         print(f"❌ Lỗi: Không tìm thấy file đầu vào '{input_file}'.")

@@ -89,41 +89,55 @@ def is_quota_exceeded():
     return _quota_exceeded.is_set()
 
 def check_quota_error(error_message):
-    """Kiểm tra xem có phải lỗi quota exceeded không"""
+    """Kiểm tra lỗi Quota/Credit Insufficient (402) - cần nạp credit - KHÔNG BAO GỒM rate limit"""
     error_str = str(error_message).lower()
     quota_keywords = [
-        "429",
-        "exceeded your current quota",
-        "quota exceeded", 
-        "rate limit",
+        "402",
+        "insufficient credits",
+        "insufficient_credits",
+        "exceeded your current quota", 
+        "quota exceeded",
         "billing",
-        "please check your plan"
+        "please check your plan",
+        "credits",
+        "balance"
     ]
-    
+    # KHÔNG BAO GỒM "429" và "rate limit" - đó là lỗi tạm thời, có thể retry!
     return any(keyword in error_str for keyword in quota_keywords)
 
-def get_optimal_threads():
+def get_optimal_threads(provider="OpenRouter", model_name=""):
     """
-    Tự động tính toán số threads tối ưu dựa trên cấu hình máy.
+    Tự động tính toán số threads tối ưu dựa trên cấu hình máy và model cụ thể.
     """
     try:
         # Lấy số CPU cores
         cpu_cores = cpu_count()
         
-        # Tính toán threads tối ưu:
-        # - Với API calls, I/O bound nên có thể dùng nhiều threads hơn số cores
-        # - Nhưng không nên quá nhiều để tránh rate limiting
-        # - Formula: min(max(cpu_cores * 2, 4), 20)
-        optimal_threads = min(max(cpu_cores * 2, 4), 20)
+        # Kiểm tra model cụ thể có rate limit chặt không
+        is_gemini_free = "google/gemini-2.0-flash-exp:free" in model_name.lower()
         
-        print(f"🖥️ Phát hiện {cpu_cores} CPU cores")
-        print(f"🔧 Threads tối ưu được đề xuất: {optimal_threads}")
+        # Tính toán threads tối ưu dựa trên model cụ thể:
+        if is_gemini_free:
+            # Chỉ Gemini free model có rate limit cực chặt - giảm threads mạnh
+            optimal_threads = min(max(cpu_cores // 2, 2), 6)
+            print(f"🖥️ Phát hiện {cpu_cores} CPU cores")
+            print(f"🔧 Gemini Free Model - Threads đã giảm để tránh rate limit: {optimal_threads}")
+        elif provider == "OpenRouter":
+            # Các OpenRouter models khác - giữ nguyên logic cũ
+            optimal_threads = min(max(cpu_cores * 2, 4), 20)
+            print(f"🖥️ Phát hiện {cpu_cores} CPU cores")
+            print(f"🔧 OpenRouter - Threads tối ưu: {optimal_threads}")
+        else:
+            # Google AI hoặc provider khác - giữ nguyên logic cũ
+            optimal_threads = min(max(cpu_cores * 2, 4), 20)
+            print(f"🖥️ Phát hiện {cpu_cores} CPU cores")
+            print(f"🔧 Threads tối ưu được đề xuất: {optimal_threads}")
         
         return optimal_threads
         
     except Exception as e:
         print(f"⚠️ Lỗi khi phát hiện CPU cores: {e}")
-        return 10  # Default fallback
+        return 10  # Default trở lại 10 như cũ
 
 def validate_threads(num_threads):
     """
@@ -445,6 +459,14 @@ VĂN BẢN CẦN DỊCH:
         
         for attempt in range(max_retries):
             try:
+                # Thêm delay nhỏ trước request để tránh rate limit (đặc biệt cho Gemini free)
+                if "google/gemini-2.0-flash-exp:free" in model_name.lower():
+                    # Chỉ Gemini free model: delay lâu hơn để tránh rate limit
+                    time.sleep(0.5)  # 500ms delay cho Gemini free model
+                else:
+                    # Các models khác: delay ngắn hơn
+                    time.sleep(0.1)  # 100ms delay cho các models khác
+                
                 response = requests.post(
                     OPENROUTER_BASE_URL,
                     headers=headers,
@@ -468,11 +490,26 @@ VĂN BẢN CẦN DỊCH:
                 time.sleep(retry_delay)
                 retry_delay *= 2
 
-        # Kiểm tra status code
-        if response.status_code == 429:
-            return ("[API HẾT QUOTA HOẶC RATE LIMIT]", True, True)
+        # Kiểm tra status code chi tiết theo OpenRouter API specs
+        if response.status_code == 400:
+            return (f"[LỖI BAD REQUEST (400): {response.text}]", False, True)
+        elif response.status_code == 401:
+            return (f"[LỖI API KEY KHÔNG HỢP LỆ (401): {response.text}]", False, True) 
         elif response.status_code == 402:
-            return ("[API HẾT CRÉDIT]", True, True)
+            # 402 = Insufficient Credits - dừng hoàn toàn
+            set_quota_exceeded()
+            return (f"[API HẾT CREDIT (402): {response.text}]", False, True)
+        elif response.status_code == 403:
+            return (f"[LỖI MODERATION (403): {response.text}]", True, False)
+        elif response.status_code == 408:
+            return (f"[LỖI TIMEOUT (408): {response.text}]", False, True)
+        elif response.status_code == 429:
+            # 429 = Rate Limit - có thể retry, KHÔNG phải quota exceeded
+            return (f"[LỖI RATE LIMIT (429): {response.text}]", False, True)
+        elif response.status_code == 502:
+            return (f"[LỖI BAD GATEWAY (502): {response.text}]", False, True)
+        elif response.status_code == 503:
+            return (f"[LỖI SERVICE UNAVAILABLE (503): {response.text}]", False, True)
         elif response.status_code != 200:
             return (f"[LỖI API HTTP {response.status_code}: {response.text}]", False, True)
 
@@ -482,13 +519,28 @@ VĂN BẢN CẦN DỊCH:
         except json.JSONDecodeError:
             return (f"[LỖI PARSE JSON: {response.text}]", False, True)
 
-        # Kiểm tra lỗi trong response
+        # Kiểm tra lỗi trong response JSON
         if 'error' in response_data:
             error_msg = response_data['error'].get('message', 'Unknown error')
-            if 'quota' in error_msg.lower() or 'rate limit' in error_msg.lower():
+            error_code = response_data['error'].get('code', '')
+            
+            # Phân loại lỗi trong response message
+            if 'insufficient credits' in error_msg.lower() or 'quota exceeded' in error_msg.lower():
+                # Quota/Credit error - dừng hoàn toàn
                 set_quota_exceeded()
-                return (f"[API HẾT QUOTA: {error_msg}]", True, True)
-            return (f"[LỖI API: {error_msg}]", False, True)
+                return (f"[API HẾT QUOTA: {error_msg}]", False, True)
+            elif 'rate limit' in error_msg.lower() or 'too many requests' in error_msg.lower():
+                # Rate limit - có thể retry
+                return (f"[RATE LIMIT: {error_msg}]", False, True)
+            elif 'unauthorized' in error_msg.lower() or 'invalid' in error_msg.lower():
+                # API key error 
+                return (f"[API KEY ERROR: {error_msg}]", False, True)
+            elif 'moderation' in error_msg.lower() or 'policy' in error_msg.lower():
+                # Content moderation
+                return (f"[MODERATION ERROR: {error_msg}]", True, False)
+            else:
+                # Generic error
+                return (f"[LỖI API: {error_msg}]", False, True)
 
         # Lấy nội dung dịch
         if 'choices' not in response_data or not response_data['choices']:
@@ -520,15 +572,16 @@ VĂN BẢN CẦN DỊCH:
     except requests.exceptions.RequestException as e:
         return (f"[LỖI REQUEST: {e}]", False, True)
     except Exception as e:
-        # Bắt các lỗi khác
+        # Bắt các lỗi khác (connection errors, etc.)
         error_message = str(e)
         
-        # Kiểm tra lỗi quota exceeded
+        # Kiểm tra lỗi quota exceeded (chỉ true quota, không phải rate limit)
         if check_quota_error(error_message):
             set_quota_exceeded()
-            return (f"[API HẾT QUOTA]", False, True)
+            return (f"[API HẾT QUOTA: {error_message}]", False, True)
         
-        return (f"[LỖI API KHI DỊCH CHUNK: {e}]", False, True)
+        # Các lỗi khác (network, timeout, etc.)
+        return (f"[LỖI EXCEPTION KHI DỊCH CHUNK: {e}]", False, True)
 
 def get_progress(progress_file_path):
     """Đọc tiến độ dịch từ file (số chunk đã hoàn thành)."""
@@ -697,10 +750,12 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, log_callb
                     return (chunk_index, translated_text + " [ĐÃ LƯU SAU KHI THỬ CẢI THIỆN]", len(chunk_lines))
                     
             except Exception as e:
-                # Kiểm tra quota error
-                if check_quota_error(str(e)):
+                error_msg = str(e)
+                
+                # Kiểm tra quota error (chỉ true quota 402, không phải rate limit 429)
+                if check_quota_error(error_msg):
                     set_quota_exceeded()
-                    return (chunk_index, f"[CHUNK {chunk_index} - API HẾT QUOTA]", len(chunk_lines))
+                    return (chunk_index, f"[CHUNK {chunk_index} - API HẾT QUOTA (402)]", len(chunk_lines))
                 
                 return (chunk_index, f"[LỖI XỬ LÝ CHUNK {chunk_index}: {e}]", len(chunk_lines))
         

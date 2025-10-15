@@ -52,7 +52,7 @@ EPUB_AVAILABLE = False
 # Try relative imports first (when run as module)
 try:
     # Import OpenRouter translate functions instead of original translate
-    from ..core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded
+    from ..core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded, validate_api_key_before_translation
     from ..core.reformat import fix_text_format
     from ..core.ConvertEpub import txt_to_docx, docx_to_epub
     TRANSLATE_AVAILABLE = True
@@ -61,7 +61,7 @@ except ImportError:
     # Try absolute imports (when run directly)
     try:
         # Import OpenRouter translate functions instead of original translate
-        from core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded
+        from core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded, validate_api_key_before_translation
         from core.reformat import fix_text_format
         from core.ConvertEpub import txt_to_docx, docx_to_epub
         TRANSLATE_AVAILABLE = True
@@ -91,6 +91,10 @@ except ImportError:
             
         def is_quota_exceeded():
             return False
+            
+        def validate_api_key_before_translation(*args, **kwargs):
+            print("❌ Chức năng test API không khả dụng")
+            return False, "Module dịch không khả dụng"
             
         def fix_text_format(*args, **kwargs):
             print("❌ Chức năng reformat không khả dụng")
@@ -851,29 +855,17 @@ class ModernTranslateNovelAI(ctk.CTk):
         if choice == "Tùy chỉnh":
             self.custom_prompt_frame.grid(row=4, column=0, sticky="ew", padx=20, pady=10)
             # Load default custom prompt
-            default_custom = """Bạn là một chuyên gia dịch thuật, chuyên dịch truyện sang tiếng Việt. Nhiệm vụ của bạn là dịch văn bản sau đây một cách chính xác, tự nhiên và tuân thủ nghiêm ngặt các quy tắc dưới đây.
+            default_custom = """NHIỆM VỤ: Dịch văn bản sang tiếng Việt hiện đại, tự nhiên.
 
-# QUY TẮC DỊCH THUẬT (BẮT BUỘC TUÂN THỦ)
+QUY TẮC QUAN TRỌNG:
+1. VĂN PHONG: Dịch như người Việt nói chuyện hàng ngày, tránh từ Hán Việt cứng nhắc
+2. NGƯỜI KỂ CHUYỆN: Luôn xưng "tôi" (hiện đại) hoặc "ta" (cổ đại). TUYỆT ĐỐI KHÔNG dùng "ba/bố/anh/chị/em/con"
+3. LỜI THOẠI: Đặt trong dấu ngoặc kép "...", xưng hô tự nhiên theo quan hệ nhân vật
+4. TỪNG NGỮ HIỆN ĐẠI: "Cảm thấy" thay vì "cảm nhận", "Anh ấy/Cô ấy" thay vì "Hắn/Nàng"
 
-1. Văn phong và Bối cảnh:
-*   Sử dụng văn phong hiện đại, tự nhiên, phù hợp với bối cảnh của câu chuyện và phù hợp với ngữ pháp tiếng Việt.
-*   Giữ nguyên tất cả các chi tiết, mô tả và nội dung gốc. Không được lược bỏ hay thay đổi ý nghĩa của văn bản.
+⚠️ QUAN TRỌNG: CHỈ TRẢ VỀ BẢN DỊCH, KHÔNG GIẢI THÍCH GÌ THÊM!
 
-2. Danh xưng người kể chuyện (QUAN TRỌNG):
-*   NGƯỜI KỂ CHUYỆN (narrator) luôn xưng "tôi" trong bối cảnh hiện đại hoặc "ta" trong bối cảnh cổ đại.
-*   KHÔNG BAO GIỜ dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị" hay bất kỳ danh xưng nào khác.
-*   Phân biệt rõ giữa lời kể của tác giả và lời thoại của nhân vật.
-
-3. Lời thoại và Xưng hô nhân vật:
-*   Xác định rõ mối quan hệ giữa các nhân vật (cha-con, anh-em, chị-em, mẹ-con,...) để sử dụng đại từ nhân xưng phù hợp.
-*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
-*   Chỉ áp dụng danh xưng quan hệ (ba, mẹ, anh, chị, con...) cho lời thoại TRONG dấu ngoặc kép.
-
-4. Định dạng Output:
-*   Chỉ trả về văn bản đã dịch. Không thêm bất kỳ lời bình luận, giải thích hay nội dung nào khác ngoài bản dịch.
-
----
-BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
+Văn bản cần dịch:"""
             self.custom_prompt_textbox.delete("0.0", "end")
             self.custom_prompt_textbox.insert("0.0", default_custom)
         else:
@@ -883,46 +875,27 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         """Tạo system instruction dựa trên bối cảnh đã chọn"""
         context = self.context_var.get()
         
-        base_instruction = """Bạn là một chuyên gia dịch thuật, chuyên dịch truyện sang tiếng Việt. Nhiệm vụ của bạn là dịch văn bản sau đây một cách chính xác, tự nhiên và tuân thủ nghiêm ngặt các quy tắc dưới đây.
+        base_instruction = """NHIỆM VỤ: Dịch văn bản sang tiếng Việt hiện đại, tự nhiên.
 
-# QUY TẮC DỊCH THUẬT (BẮT BUỘC TUÂN THỦ)
+QUY TẮC QUAN TRỌNG:
+1. VĂN PHONG: Dịch như người Việt nói chuyện hàng ngày, tránh từ Hán Việt cứng nhắc
+2. NGƯỜI KỂ CHUYỆN: Luôn xưng "tôi" (hiện đại) hoặc "ta" (cổ đại). TUYỆT ĐỐI KHÔNG dùng "ba/bố/anh/chị/em/con"
+3. LỜI THOẠI: Đặt trong dấu ngoặc kép "...", xưng hô tự nhiên theo quan hệ nhân vật
+4. TỪNG NGỮ HIỆN ĐẠI: "Cảm thấy" thay vì "cảm nhận", "Anh ấy/Cô ấy" thay vì "Hắn/Nàng"
 
-1. Văn phong và Bối cảnh:
-*   Sử dụng văn phong hiện đại, tự nhiên, phù hợp với bối cảnh của câu chuyện và phù hợp với ngữ pháp tiếng Việt.
-*   Giữ nguyên tất cả các chi tiết, mô tả và nội dung gốc. Không được lược bỏ hay thay đổi ý nghĩa của văn bản.
+⚠️ QUAN TRỌNG: CHỈ TRẢ VỀ BẢN DỊCH, KHÔNG GIẢI THÍCH GÌ THÊM!
 
-2. Danh xưng người kể chuyện (QUAN TRỌNG):
-*   NGƯỜI KỂ CHUYỆN (narrator) luôn xưng "tôi" trong bối cảnh hiện đại hoặc "ta" trong bối cảnh cổ đại.
-*   KHÔNG BAO GIỜ dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị" hay bất kỳ danh xưng nào khác.
-*   Phân biệt rõ giữa lời kể của tác giả và lời thoại của nhân vật.
-
-3. Lời thoại và Xưng hô nhân vật:
-*   Xác định rõ mối quan hệ giữa các nhân vật (cha-con, anh-em, chị-em, mẹ-con,...) để sử dụng đại từ nhân xưng phù hợp.
-*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
-*   Chỉ áp dụng danh xưng quan hệ (ba, mẹ, anh, chị, con...) cho lời thoại TRONG dấu ngoặc kép.
-
-4. Định dạng Output:
-*   Chỉ trả về văn bản đã dịch. Không thêm bất kỳ lời bình luận, giải thích hay nội dung nào khác ngoài bản dịch.
-
----
-BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
+Văn bản cần dịch:"""
         
         context_instructions = {
             "Bối cảnh hiện đại": f"""{base_instruction}
 
-# BỐI CẢNH ĐẶC BIỆT - HIỆN ĐẠI:
+BỔ SUNG CHO HIỆN ĐẠI:
+- Xưng hô lời thoại: "mình/bạn", "tao/mày", "anh/chị/em" tùy quan hệ
+- Tránh từ cũ: "Hắn"→"Anh ấy", "Nàng"→"Cô ấy", "Thân thể"→"Cơ thể"  
+- Giữ từ lóng, slang nếu có trong gốc
 
-5. Văn phong hiện đại:
-*   Sử dụng ngôn ngữ tự nhiên, gần gũi, phù hợp với cuộc sống hiện đại
-*   Người kể chuyện luôn xưng "tôi" (KHÔNG dùng ba, bố, con, anh, chị...)
-*   Lời thoại nhân vật: anh/chị, em, bạn, cậu/mày, ông/bà (tùy mối quan hệ)
-*   Giữ nguyên các từ ngữ thô tục, tình dục, slang nếu có trong nguyên bản
-*   Sử dụng thuật ngữ công nghệ, mạng xã hội, đời sống đô thị hiện đại
-
-6. Đặc điểm riêng:
-*   Lời thoại tự nhiên như người Việt nói hàng ngày
-*   Không cần quá trang trọng trừ khi ngữ cảnh yêu cầu
-*   Giữ nguyên tên riêng, địa danh, thương hiệu nước ngoài""",
+CHỈ TRẢ VỀ BẢN DỊCH!""",
 
             "Bối cảnh cổ đại": f"""{base_instruction}
 
@@ -1023,24 +996,31 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         self.log(f"🔄 Đã reset tên file output: {os.path.basename(output_path)}")
     
     def auto_detect_threads(self, silent=False):
-        """Tự động phát hiện số threads tối ưu cho máy"""
+        """Tự động phát hiện số threads tối ưu cho máy và provider"""
         try:
-            import multiprocessing
-            cpu_cores = multiprocessing.cpu_count()
+            # Import hàm get_optimal_threads từ open_router_translate
+            from .core.open_router_translate import get_optimal_threads
             
-            # Tính toán threads tối ưu:
-            # - I/O bound tasks nên dùng nhiều threads hơn số cores
-            # - Nhưng không quá nhiều để tránh rate limiting
-            optimal_threads = min(max(cpu_cores * 2, 4), 20)
+            # Lấy thông tin provider và model name
+            provider = self.get_current_provider()
+            model_name = self.model_var.get()
+            
+            # Kiểm tra xem có phải Gemini free model cụ thể không
+            is_gemini_free = "google/gemini-2.0-flash-exp:free" in model_name.lower()
+            
+            # Tính toán threads tối ưu dựa trên provider và model name
+            optimal_threads = get_optimal_threads(provider=provider, model_name=model_name)
             
             self.threads_var.set(str(optimal_threads))
             
             if not silent:
-                self.log(f"🖥️ Phát hiện {cpu_cores} CPU cores")
-                self.log(f"🔧 Đã đặt threads tối ưu: {optimal_threads}")
-                show_success(f"Đã đặt threads tối ưu: {optimal_threads}\n(Dựa trên {cpu_cores} CPU cores)", parent=self)
-            else:
-                self.log(f"🔧 Tự động đặt {optimal_threads} threads (CPU: {cpu_cores} cores)")
+                message = f"Đã đặt threads tối ưu: {optimal_threads}\n(Provider: {provider}, Model: {model_name})"
+                
+                # Thêm tip cho Gemini free model
+                if is_gemini_free:
+                    message += f"\n\n💡 TIP: Gemini Free model có rate limit cực chặt, đã tự động:\n• Giảm threads xuống {optimal_threads}\n• Thêm delay 500ms giữa requests\n• Tăng retry lên 5 lần"
+                
+                show_success(message, parent=self)
                 
         except Exception as e:
             if not silent:
@@ -1068,7 +1048,18 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         """Update log UI (thread-safe)"""
         try:
             timestamp = datetime.now().strftime("%H:%M:%S")
-            log_message = f"[{timestamp}] {message}"
+            
+            # Detect adaptive scaling messages và thêm formatting đặc biệt
+            if "SCALE DOWN" in message or "SCALE UP" in message:
+                log_message = f"[{timestamp}] 🎯 {message}"
+            elif "Thread Manager Stats" in message:
+                log_message = f"[{timestamp}] 📊 {message}"
+            elif "Khởi động thread pool" in message:
+                log_message = f"[{timestamp}] 🔧 {message}"
+            elif "Adaptive scaling" in message:
+                log_message = f"[{timestamp}] 🔄 {message}"
+            else:
+                log_message = f"[{timestamp}] {message}"
             
             # Update log textbox
             if hasattr(self, 'log_textbox') and self.log_textbox is not None:
@@ -1178,10 +1169,18 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
             show_error("Vui lòng chọn file input trước!", parent=self)
             return
         
-        # Kiểm tra API key
-        if not self.api_key_var.get().strip():
-            show_error("Vui lòng nhập API Key!", parent=self)
-            return
+        # Kiểm tra API key dựa trên provider hiện tại
+        api_key = self.get_current_api_key()
+        provider = self.get_current_provider()
+        
+        if provider == "Google AI":
+            if not api_key or (isinstance(api_key, list) and len(api_key) == 0):
+                show_error(f"Vui lòng nhập ít nhất 1 Google AI API Key", parent=self)
+                return
+        else:
+            if not api_key or not api_key.strip():
+                show_error(f"Vui lòng nhập {provider} API Key", parent=self)
+                return
         
         self.log("▶️ Tiếp tục dịch từ nơi đã dừng...")
         self.start_translation()
@@ -1642,19 +1641,19 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
             if key_type == "Paid Key":
                 return self.google_ai_paid_key_var.get().strip()
             else: # Free Keys
-            # Get all keys from textbox
-            keys_text = self.google_ai_keys_textbox.get("0.0", "end").strip()
-            if not keys_text:
-                return []
-            
-            # Parse keys (1 key per line)
-            keys = []
-            for line in keys_text.split('\n'):
-                key = line.strip()
-                if key and not key.startswith('#'):  # Skip empty lines and comments
-                    keys.append(key)
-            
-            return keys if keys else []
+                # Get all keys from textbox
+                keys_text = self.google_ai_keys_textbox.get("0.0", "end").strip()
+                if not keys_text:
+                    return []
+                
+                # Parse keys (1 key per line)
+                keys = []
+                for line in keys_text.split('\n'):
+                    key = line.strip()
+                    if key and not key.startswith('#'):  # Skip empty lines and comments
+                        keys.append(key)
+                
+                return keys if keys else []
         return ""
     
     def get_current_provider(self):
@@ -1725,3 +1724,148 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
                 chunk_size_lines=chunk_size,
                 provider=provider,
                 context=context,
+                is_paid_key=is_paid_key
+            )
+            
+            # Re-enable UI elements after completion
+            self.after(0, self.translation_finished)
+            
+            # Post-translation actions
+            if success and not is_translation_stopped():
+                # Auto reformat
+                if self.auto_reformat_var.get():
+                    self.log("🔧 Bắt đầu reformat file đã dịch...")
+                    try:
+                        fix_text_format(output_file)
+                        self.log("✅ Reformat hoàn thành!")
+                    except Exception as e:
+                        self.log(f"⚠️ Lỗi khi reformat: {e}")
+                
+                # Auto convert to EPUB
+                if self.auto_convert_epub_var.get():
+                    self.log("📚 Bắt đầu convert EPUB...")
+                    self.convert_to_epub(output_file)
+            
+        except Exception as e:
+            self.log(f"❌ Lỗi nghiêm trọng trong thread dịch: {e}")
+            # Ensure UI is re-enabled even on critical error
+            self.after(0, self.translation_finished)
+
+    def show_quota_exceeded_dialog(self):
+        """Hiển thị dialog khi hết quota"""
+        from tkinter import Toplevel, Text, END, Label
+        
+        dialog = Toplevel(self)
+        dialog.title("💳 API Hết Quota")
+        dialog.geometry("500x350")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(bg=self.cget("bg"))
+        
+        Label(dialog, text="API Key của bạn đã hết quota.", font=ctk.CTkFont(size=14, weight="bold"), bg=self.cget("bg"), fg="white").pack(pady=(20, 10))
+        
+        text_content = """Để tiếp tục dịch, vui lòng:
+1. Tạo tài khoản Google Cloud mới (nếu chưa có).
+2. Nhận 300$ credit miễn phí.
+3. Tạo API key mới từ ai.google.dev.
+4. Cập nhật API key trong app và tiếp tục dịch.
+
+File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay sau khi cập nhật key mới.
+"""
+        
+        text_widget = Text(dialog, wrap="word", height=10, width=60, font=("Segoe UI", 10), bg="#2b2b2b", fg="white", relief="flat", padx=10, pady=10)
+        text_widget.insert(END, text_content)
+        text_widget.config(state="disabled")
+        text_widget.pack(pady=10, padx=20)
+        
+        ok_button = ctk.CTkButton(dialog, text="OK", command=dialog.destroy, width=100)
+        ok_button.pack(pady=(10, 20))
+
+    def test_api_connection(self):
+        """Test API connection in a separate thread."""
+        self.log("🧪 Đang kiểm tra kết nối API...")
+        self.test_api_btn.configure(state="disabled", text="🧪 Đang kiểm tra...")
+
+        provider = self.get_current_provider()
+        api_key = self.get_current_api_key()
+        model = self.get_current_model()
+        
+        # For Google AI, if multiple free keys are provided, test the first one.
+        if provider == "Google AI" and isinstance(api_key, list):
+            if not api_key:
+                self.log("❌ Vui lòng nhập ít nhất một Google AI API key.")
+                show_error("Vui lòng nhập ít nhất một Google AI API key.", parent=self)
+                self.test_api_btn.configure(state="normal", text="🧪 Test API")
+                return
+            api_key_to_test = api_key[0]
+        else:
+            api_key_to_test = api_key
+
+        if not api_key_to_test:
+            provider_name = "OpenRouter" if provider == "OpenRouter" else "Google AI"
+            self.log(f"❌ Vui lòng nhập API key cho {provider_name}.")
+            show_error(f"Vui lòng nhập API key cho {provider_name}.", parent=self)
+            self.test_api_btn.configure(state="normal", text="🧪 Test API")
+            return
+
+        threading.Thread(target=self._run_api_test, args=(api_key_to_test, model, provider), daemon=True).start()
+
+    def _run_api_test(self, api_key, model, provider):
+        """Worker function to test API."""
+        is_valid, message = validate_api_key_before_translation(api_key, model, provider)
+        
+        def update_ui():
+            if is_valid:
+                self.log(f"✅ Kết nối API thành công: {message}")
+                show_success("Kết nối API thành công!", details=message, parent=self)
+            else:
+                self.log(f"❌ Lỗi kết nối API: {message}")
+                show_error("Kết nối API thất bại!", details=message, parent=self)
+            self.test_api_btn.configure(state="normal", text="🧪 Test API")
+
+        self.after(0, update_ui)
+    
+    def set_light_mode(self):
+        """Chuyển sang chế độ sáng"""
+        ctk.set_appearance_mode("light")
+        self.log("☀️ Đã chuyển sang Light Mode")
+        self.update_appearance_buttons()
+    
+    def set_dark_mode(self):
+        """Chuyển sang chế độ tối"""
+        ctk.set_appearance_mode("dark")
+        self.log("🌙 Đã chuyển sang Dark Mode")
+        self.update_appearance_buttons()
+    
+    def update_appearance_buttons(self):
+        """Cập nhật màu sắc của nút appearance mode"""
+        try:
+            current_mode = ctk.get_appearance_mode()
+            
+            if current_mode == "Light":
+                # Light mode active
+                self.light_mode_btn.configure(
+                    fg_color=("gray75", "gray25"),
+                    text_color=("gray10", "gray90")
+                )
+                self.dark_mode_btn.configure(
+                    fg_color=("gray90", "gray13"),
+                    text_color=("gray10", "gray90")
+                )
+            else:
+                # Dark mode active
+                self.light_mode_btn.configure(
+                    fg_color=("gray90", "gray13"),
+                    text_color=("gray10", "gray90")
+                )
+                self.dark_mode_btn.configure(
+                    fg_color=("gray75", "gray25"),
+                    text_color=("gray10", "gray90")
+                )
+        except Exception as e:
+            print(f"⚠️ Lỗi cập nhật appearance buttons: {e}")
+
+if __name__ == "__main__":
+    app = ModernTranslateNovelAI()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app.mainloop()
