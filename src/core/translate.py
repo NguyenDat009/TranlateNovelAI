@@ -172,10 +172,14 @@ def validate_api_key_before_translation(api_key, model_name, provider="OpenRoute
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(model_name)
             
-            response = model.generate_content("Test")
+            # Test với content nhỏ để kiểm tra quota
+            test_content = "Hello, test quota"
+            response = model.generate_content(test_content)
             
             if response and response.text:
-                return True, "Google AI API key hợp lệ"
+                # Thêm thông tin về project ID nếu có thể
+                masked_key = api_key[:10] + "***" + api_key[-10:] if len(api_key) > 20 else "***"
+                return True, f"Google AI API key hợp lệ ({masked_key})"
             else:
                 return False, "Google AI API trả về response rỗng"
                 
@@ -274,6 +278,7 @@ def validate_chunk_size(chunk_size):
     except (ValueError, TypeError):
         return 100  # Default
 
+
 # Default values
 NUM_WORKERS = get_optimal_threads()  # Tự động tính theo máy
 
@@ -303,28 +308,35 @@ def format_error_chunk(error_type: str, error_message: str, original_lines: list
     return error_output
 
 
-def is_bad_translation(text):
+def is_bad_translation(text, input_text=None):
     """
-    Kiểm tra xem bản dịch của chunk có đạt yêu cầu không (kiểm tra đơn giản dựa vào độ rỗng và từ chối).
-    Trả về True nếu bản dịch không đạt yêu cầu (ví dụ: rỗng hoặc chứa từ từ chối), False nếu đạt yêu cầu.
+    Kiểm tra xem bản dịch của chunk có đạt yêu cầu không.
+    
+    Args:
+        text: Văn bản đã dịch
+        input_text: Văn bản gốc để so sánh kích thước
+        
+    Returns:
+        True nếu bản dịch không đạt yêu cầu, False nếu đạt yêu cầu.
     """
     if text is None or text.strip() == "":
         # Chunk dịch ra rỗng hoặc chỉ trắng => coi là bad translation
         return True
 
     # Các từ khóa chỉ báo bản dịch không đạt yêu cầu
-    # Các từ khóa này thường xuất hiện khi AI từ chối dịch
     bad_keywords = [
         "tôi không thể dịch",
         "không thể dịch",
         "xin lỗi, tôi không",
         "tôi xin lỗi",
-        "nội dung bị chặn", # Thêm kiểm tra thông báo chặn cũng là bản dịch xấu cần retry
-        "as an ai", # Từ chối bằng tiếng Anh
+        "nội dung bị chặn",
+        "as an ai",
         "as a language model",
         "i am unable",
         "i cannot",
-        "i'm sorry"
+        "i'm sorry",
+        "[bị cắt - cần chunk nhỏ hơn]",
+        "[có thể bị thiếu]"
     ]
 
     text_lower = text.lower()
@@ -332,12 +344,154 @@ def is_bad_translation(text):
         if keyword in text_lower:
             return True
 
+    text_stripped = text.strip()
+    
+    # Kiểm tra response có hoàn chỉnh không dựa trên ký tự cuối
+    if len(text_stripped) > 20:  # Chỉ check với text đủ dài
+        last_char = text_stripped[-1]
+        
+        # Ký tự cuối hợp lệ (response hoàn chỉnh)
+        valid_ending_chars = '.!?。！？"』」)）…—'
+        
+        # Ký tự cuối không hợp lệ (response chưa hoàn chỉnh)
+        invalid_ending_chars = ' \t\n'  # space, tab, newline
+        
+        # Nếu kết thúc bằng ký tự không hợp lệ -> response chưa hoàn chỉnh
+        if last_char in invalid_ending_chars:
+            print(f"⚠️ Response chưa hoàn chỉnh: kết thúc bằng ký tự trắng '{repr(last_char)}'")
+            return True
+            
+    # User request: Nếu response dài từ 80-100% so với gốc, bỏ qua kiểm tra ký tự cuối
+    if input_text:
+        input_length = len(input_text.strip())
+        output_length = len(text_stripped)
+        ratio = output_length / input_length if input_length > 0 else 0
+        if 0.8 < ratio < 1.0:
+            print(f"✅ Response có độ dài phù hợp ({ratio:.1%}), bỏ qua kiểm tra ký tự cuối.")
+            return False # Coi là hoàn thành
+            
+    # Kiểm tra trường hợp ngoại lệ: tiêu đề chương và nội dung chương
+    text_lower = text_stripped.lower()
+    is_chapter_title = False
+    is_chapter_content = False
+    
+    # Các pattern tiêu đề chương (thường ở đầu dòng)
+    chapter_patterns = [
+        r'^chương\s+\d+',          # "chương 1", "chương 23"
+        r'^chương\s+[ivxlc]+',     # "chương i", "chương iv"  
+        r'^chapter\s+\d+',         # "chapter 1", "chapter 23"
+        r'^第\d+章',                # "第1章", "第23章"
+        r'^phần\s+\d+',            # "phần 1", "phần 2"
+        r'^tập\s+\d+',             # "tập 1", "tập 2"
+    ]
+    
+    # Kiểm tra xem có phải tiêu đề chương thuần túy không (ngắn, chỉ có tiêu đề)
+    for pattern in chapter_patterns:
+        if re.search(pattern, text_lower) and len(text_stripped) < 200:
+            is_chapter_title = True
+            break
+    
+    # Nếu không phải tiêu đề chương thuần túy, kiểm tra có phải nội dung chứa chương không
+    if not is_chapter_title:
+        chapter_keywords = ['chương', 'chapter', '第', 'phần', 'tập']
+        for keyword in chapter_keywords:
+            if keyword in text_lower:
+                is_chapter_content = True
+                break
+    
+    # Xử lý theo loại nội dung
+    if is_chapter_title:
+        # Tiêu đề chương thuần túy (ngắn) - có thể kết thúc bằng chữ cái/số
+        valid_chapter_endings = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-–—')
+        if last_char in valid_chapter_endings or last_char in valid_ending_chars:
+            print(f"✅ Phát hiện tiêu đề chương, cho phép kết thúc bằng '{last_char}'")
+            # Tiêu đề chương không cần kiểm tra strict về ký tự cuối
+            pass  
+        else:
+            print(f"⚠️ Tiêu đề chương nhưng kết thúc bất thường: '{last_char}'")
+            return True
+    elif is_chapter_content:
+        # Nội dung có chứa chương (dài) - áp dụng rule thông thường nhưng linh hoạt hơn
+        if last_char in valid_ending_chars:
+            print(f"✅ Nội dung chương kết thúc hợp lệ bằng '{last_char}'")
+            # Dấu câu hợp lệ, không coi là bad
+            pass
+        elif last_char.isalpha():
+            print(f"⚠️ Nội dung chương có thể chưa hoàn chỉnh: kết thúc bằng chữ cái '{last_char}'")
+            return True
+        elif last_char.isdigit():
+            print(f"ℹ️ Nội dung chương kết thúc bằng số '{last_char}' - có thể hợp lệ")
+            # Số có thể hợp lệ trong nội dung chương, không coi là bad
+            pass
+        else:
+            print(f"⚠️ Nội dung chương kết thúc bất thường: '{last_char}'")
+            return True
+    else:
+        # Nội dung thông thường - áp dụng rule nghiêm ngặt
+        if last_char.isalpha():
+            print(f"⚠️ Response có thể chưa hoàn chỉnh: kết thúc bằng chữ cái '{last_char}'")
+            return True
+        
+    # Nếu kết thúc bằng dấu câu hợp lệ -> response có thể hoàn chỉnh
+    if last_char in valid_ending_chars:
+        # Nhưng vẫn cần kiểm tra kích thước nếu có input_text
+        pass
+    
+    # Kiểm tra kích thước output so với input (50-60% threshold)
+    if input_text and len(input_text.strip()) > 50:  # Chỉ check với input đủ dài
+        input_length = len(input_text.strip())
+        output_length = len(text_stripped)
+        
+        # Tính tỷ lệ output/input
+        ratio = output_length / input_length if input_length > 0 else 0
+        
+        # Sử dụng cờ is_chapter_content hoặc is_chapter_title đã được xác định ở trên
+        # Nếu chưa được xác định, kiểm tra lại
+        if not (is_chapter_content or is_chapter_title):
+            text_lower = text_stripped.lower()
+            input_lower = input_text.lower()
+            chapter_keywords = ['chương', 'chapter', '第', 'phần', 'tập']
+            for keyword in chapter_keywords:
+                if keyword in text_lower or keyword in input_lower:
+                    is_chapter_content = True
+                    break
+        
+        # Nếu là nội dung có chương, áp dụng threshold linh hoạt hơn
+        if is_chapter_content or is_chapter_title:
+            # Tiêu đề chương thường ngắn hơn, threshold thấp hơn (30% thay vì 50%)
+            min_ratio = 0.3
+            warning_ratio = 0.4
+            
+            if ratio < min_ratio:
+                print(f"⚠️ Output quá ngắn so với input (chương): {ratio:.2%} (Input: {input_length} chars, Output: {output_length} chars)")
+                return True
+            elif ratio < warning_ratio:
+                print(f"ℹ️ Output hơi ngắn nhưng có thể là tiêu đề chương: {ratio:.2%} (Input: {input_length} chars, Output: {output_length} chars)")
+                # Đối với tiêu đề chương, chỉ coi là bad nếu kết thúc rất bất thường
+                if len(text_stripped) > 20:
+                    last_char = text_stripped[-1]
+                    if last_char in ' \t\n':  # Chỉ coi là bad nếu kết thúc bằng whitespace
+                        return True
+        else:
+            # Nội dung thông thường, áp dụng threshold chuẩn
+            if ratio < 0.5:
+                print(f"⚠️ Output quá ngắn so với input: {ratio:.2%} (Input: {input_length} chars, Output: {output_length} chars)")
+                return True
+            elif ratio < 0.6:
+                print(f"⚠️ Output hơi ngắn so với input: {ratio:.2%} (Input: {input_length} chars, Output: {output_length} chars)")
+                # Chỉ coi là bad nếu kết thúc không hợp lệ
+                if len(text_stripped) > 20:
+                    last_char = text_stripped[-1]
+                    if last_char.isalpha() or last_char in ' \t\n':
+                        return True
+    
     return False
 
-def translate_chunk(model, chunk_lines):
+def translate_chunk(model, chunk_lines, context="modern"):
     """
     Dịch một chunk gồm nhiều dòng văn bản.
     chunk_lines: danh sách các dòng văn bản
+    context: "modern" (hiện đại) hoặc "ancient" (cổ đại)
     Trả về (translated_text, is_safety_blocked_flag, is_bad_translation_flag).
     """
     # Gom các dòng thành một chuỗi lớn để gửi đi
@@ -348,8 +502,53 @@ def translate_chunk(model, chunk_lines):
         return ("", False, False) # Trả về chuỗi rỗng, không bị chặn, không bad translation
 
     try:
-        # Prompt cho dịch chunk
-        prompt = f"Dịch đoạn văn bản sau sang tiếng Việt một cách trực tiếp, Danh xưng nhân vật dẫn truyện xưng 'tôi' theo bối cảnh hiện đại hoặc 'ta' theo bối cảnh cổ đại,xác định mối quan hệ và danh xưng phù hợp trước tiên, không từ chối hoặc bình luận, giữ nguyên văn phong gốc và chi tiết nội dung:\n\n{full_text_to_translate}"
+        # Tạo prompt khác nhau cho từng bối cảnh
+        if context == "ancient":
+            # Prompt cho bối cảnh cổ đại
+            prompt = f"""Dịch đoạn văn bản sau sang tiếng Việt theo phong cách CỔ ĐẠI:
+
+QUY TẮC DANH XƯNG CỔ ĐẠI:
+- NGƯỜI KỂ CHUYỆN (narrator) LUÔN xưng "ta" - KHÔNG BAO GIỜ dùng "tôi", "thần", "hạ thần"
+- KHÔNG dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị"
+- Lời thoại nhân vật trong "..." có thể dùng: ta/ngươi, hạ thần/thần tử, công tử/tiểu thư
+
+PHONG CÁCH CỔ ĐẠI:
+- Ngôn ngữ trang trọng, lịch thiệp
+- Thuật ngữ võ thuật: công pháp, tâm pháp, tu vi, cảnh giới
+- Chức vị: hoàng thượng, hoàng hậu, thái tử, đại thần
+- Từ Hán Việt khi phù hợp
+
+QUAN TRỌNG - OUTPUT:
+- CHỈ trả về nội dung đã dịch
+- KHÔNG thêm giải thích, phân tích, bình luận
+- KHÔNG thêm "Bản dịch:", "Kết quả:", hay bất kỳ tiêu đề nào
+- KHÔNG thêm ghi chú hay chú thích
+
+VĂN BẢN CẦN DỊCH:
+{full_text_to_translate}"""
+        else:
+            # Prompt cho bối cảnh hiện đại
+            prompt = f"""Dịch đoạn văn bản sau sang tiếng Việt theo phong cách HIỆN ĐẠI:
+
+QUY TẮC DANH XƯNG HIỆN ĐẠI:
+- NGƯỜI KỂ CHUYỆN (narrator) LUÔN xưng "tôi" - KHÔNG BAO GIỜ dùng "ta", "ba", "bố", "con"
+- KHÔNG dịch người kể chuyện thành danh xưng quan hệ
+- Lời thoại nhân vật trong "..." có thể dùng: anh/chị, em, bạn, ba/mẹ, con
+
+PHONG CÁCH HIỆN ĐẠI:
+- Ngôn ngữ tự nhiên, gần gũi
+- Thuật ngữ công nghệ, đời sống đô thị
+- Giữ từ ngữ thô tục, slang nếu có
+- Không quá trang trọng
+
+QUAN TRỌNG - OUTPUT:
+- CHỈ trả về nội dung đã dịch
+- KHÔNG thêm giải thích, phân tích, bình luận
+- KHÔNG thêm "Bản dịch:", "Kết quả:", hay bất kỳ tiêu đề nào
+- KHÔNG thêm ghi chú hay chú thích
+
+VĂN BẢN CẦN DỊCH:
+{full_text_to_translate}"""
 
         response = model.generate_content(
             contents=[{
@@ -390,7 +589,7 @@ def translate_chunk(model, chunk_lines):
 
         # Nếu không bị chặn, trả về văn bản dịch
         translated_text = response.text
-        is_bad = is_bad_translation(translated_text)
+        is_bad = is_bad_translation(translated_text, full_text_to_translate)
         return (translated_text, False, is_bad)
 
     except Exception as e:
@@ -461,7 +660,7 @@ def load_progress_with_info(progress_file_path):
             return {'completed_chunks': 0}
     return {'completed_chunks': 0}
 
-def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None):
+def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None, context="modern", is_paid_key=False):
     """
     Xử lý dịch một chunk với retry logic và rate limiting.
     chunk_data: tuple (chunk_index, chunk_lines, chunk_start_line_index)
@@ -469,6 +668,7 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
     
     Args:
         key_rotator: KeyRotator instance nếu sử dụng multiple keys (Google AI only)
+        context: "modern" (hiện đại) hoặc "ancient" (cổ đại) để xác định danh xưng người kể chuyện
     """
     chunk_index, chunk_lines, chunk_start_line_index = chunk_data
     
@@ -480,7 +680,7 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
     current_api_key = key_rotator.get_next_key() if key_rotator else api_key
     
     # Get rate limiter cho Google AI với specific key (None cho OpenRouter)
-    rate_limiter = get_rate_limiter(model_name, provider, current_api_key if provider == "Google AI" else None)
+    rate_limiter = get_rate_limiter(model_name, provider, current_api_key if provider == "Google AI" else None, is_paid_key=is_paid_key)
     
     # Debug logging
     if rate_limiter and provider == "Google AI":
@@ -557,30 +757,8 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                             rate_limiter.acquire()  # Non-blocking multi-thread acquire
                         
                         if use_google_ai:
-                            # Gom các dòng thành một chuỗi lớn để gửi đi
-                            full_text_to_translate = "\n".join(chunk_lines)
-                            
-                            # Bỏ qua các chunk chỉ chứa các dòng trống
-                            if not full_text_to_translate.strip():
-                                return (chunk_index, "", len(chunk_lines), line_range)
-                            
-                            # Dịch với Google AI
-                            prompt = f"{system_instruction}\n\n{full_text_to_translate}"
-                            response = model.generate_content(prompt)
-                            
-                            # Kiểm tra safety blocks
-                            if response.prompt_feedback and hasattr(response.prompt_feedback, 'block_reason'):
-                                is_safety_blocked = True
-                                translated_text = f"[NỘI DUNG BỊ CHẶN BỞI BỘ LỌC AN TOÀN]"
-                                is_bad = False
-                            elif response.candidates and response.candidates[0].finish_reason.name == 'SAFETY':
-                                is_safety_blocked = True
-                                translated_text = f"[NỘI DỊCH BỊ CHẶN BỞI BỘ LỌC AN TOÀN]"
-                                is_bad = False
-                            else:
-                                translated_text = response.text
-                                is_safety_blocked = False
-                                is_bad = is_bad_translation(translated_text)
+                            # Dịch với Google AI sử dụng hàm translate_chunk với context
+                            translated_text, is_safety_blocked, is_bad = translate_chunk(model, chunk_lines, context)
                             
                             # Báo success cho adaptive throttling
                             if rate_limiter:
@@ -589,7 +767,7 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                             break  # Success, thoát khỏi rate limit retry loop
                                 
                         elif use_openrouter:
-                            translated_text, is_safety_blocked, is_bad = openrouter_translate_chunk(api_key, model_name, system_instruction, chunk_lines)
+                            translated_text, is_safety_blocked, is_bad = openrouter_translate_chunk(api_key, model_name, system_instruction, chunk_lines, context)
                             break  # Success, thoát khỏi rate limit retry loop
                         else:
                             error_text = format_error_chunk("PROVIDER ERROR", f"Provider không được hỗ trợ: {provider}", chunk_lines, line_range)
@@ -617,6 +795,11 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                 if is_quota_exceeded():
                     error_text = format_error_chunk("API HẾT QUOTA", "API đã hết quota sau khi dịch", chunk_lines, line_range)
                     return (chunk_index, error_text, len(chunk_lines), line_range)
+                
+                # Log successful request với key info để track quota usage
+                if use_google_ai and current_api_key:
+                    key_hash = _get_key_hash(current_api_key)
+                    print(f"✅ Chunk {chunk_index}: Key ***{key_hash} - Success")
                 
                 if is_safety_blocked:
                     break # Thoát khỏi vòng lặp bad translation, sẽ retry safety
@@ -683,12 +866,14 @@ def generate_output_filename(input_filepath):
     else:
         return new_name
 
-def translate_file_optimized(input_file, output_file=None, api_key=None, model_name="gemini-2.0-flash", system_instruction=None, num_workers=None, chunk_size_lines=None, provider="OpenRouter"):
+def translate_file_optimized(input_file, output_file=None, api_key=None, model_name="gemini-2.0-flash", system_instruction=None, num_workers=None, chunk_size_lines=None, provider="OpenRouter", context="modern", is_paid_key=False):
     """
     Phiên bản dịch file với multi-threading chunks.
     
     Args:
         api_key: String (OpenRouter) hoặc List (Google AI multiple keys)
+        context: "modern" (hiện đại - dùng "tôi") hoặc "ancient" (cổ đại - dùng "ta")
+        is_paid_key: True nếu sử dụng Google AI key trả phí
     """
     # Clear stop flag khi bắt đầu dịch mới
     clear_stop_translation()
@@ -713,39 +898,41 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     
     # Tính toán threads cho Google AI dựa trên số lượng keys
     if provider == "Google AI":
-        # Xác định base RPM dựa trên model
-        if "1.5-pro" in model_name.lower():
-            base_rpm = 2  # Pro model có RPM rất thấp
-            base_threads = 1
-        elif "2.0-flash" in model_name.lower() or "2.0flash" in model_name.lower():
-            base_rpm = 10
-            base_threads = 2
-        elif "1.5-flash" in model_name.lower() or "1.5flash" in model_name.lower():
-            base_rpm = 15
-            base_threads = 3
-        else:
-            base_rpm = 10  # Default safe
-            base_threads = 2
+        is_multi_key = isinstance(api_key, list) and len(api_key) > 1
         
-        # Tính số keys để scale threads
-        num_keys = 1
-        if isinstance(api_key, list):
+        # Chỉ tự động điều chỉnh số threads khi người dùng cung cấp nhiều API keys (chế độ free)
+        # để tránh chạm vào giới hạn rate limit quá nhanh.
+        if is_multi_key:
             num_keys = len(api_key)
-        
-        # Scale threads dựa trên số keys (mỗi key có thể handle base_threads)
-        max_threads_google = min(base_threads * num_keys, 20)  # Cap tại 20 threads
-        
-        if num_workers > max_threads_google:
-            print(f"🔧 Google AI với {num_keys} keys:")
-            print(f"   📊 Base RPM: {base_rpm} × {num_keys} keys = {base_rpm * num_keys} RPM tổng")
-            print(f"   ⚡ Threads: {num_workers} → {max_threads_google} (tối ưu cho {num_keys} keys)")
-            print(f"   🌐 Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits?hl=vi")
-            num_workers = max_threads_google
-        elif num_keys > 1:
-            print(f"🚀 Google AI Multi-Key Setup:")
-            print(f"   🔑 Keys: {num_keys} keys")
-            print(f"   📊 Total RPM: ~{base_rpm * num_keys} RPM")
-            print(f"   ⚡ Threads: {num_workers} (tối ưu cho multi-threading)")
+            
+            # Ước tính RPM dựa trên model để hiển thị log cho người dùng
+            if "pro" in model_name.lower():
+                base_rpm = 2
+            else:
+                base_rpm = 10 # Ước tính an toàn cho các model Flash
+            
+            # Giới hạn số threads để tránh burst limit. 
+            # Quy tắc chung: 1-2 threads cho mỗi key.
+            # Ở đây ta dùng 1 thread/key, tối đa 5 threads tổng.
+            max_threads_for_free_keys = min(num_keys * 1, 5)
+            
+            if num_workers > max_threads_for_free_keys:
+                print(f"🔧 Google AI (Chế độ Free - {num_keys} keys):")
+                print(f"   📊 Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
+                print(f"   ⚡ Điều chỉnh Threads: {num_workers} → {max_threads_for_free_keys} (1 thread/key để tránh burst limit)")
+                print(f"   🌐 Tham khảo rate limits tại trang chủ Google AI.")
+                num_workers = max_threads_for_free_keys
+            else:
+                print(f"🚀 Google AI (Chế độ Free - {num_keys} keys):")
+                print(f"   📊 Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
+                print(f"   ⚡ Sử dụng {num_workers} threads theo cài đặt.")
+        else:
+            # Với 1 key (chế độ trả phí hoặc 1 key free), tin tưởng vào setting của người dùng.
+            # Key trả phí có RPM cao hơn nhiều.
+            print(f"💳 Google AI (Chế độ 1 Key - Paid/Free):")
+            print(f"   ⚡ Sử dụng {num_workers} threads theo cài đặt của người dùng.")
+            print(f"   💡 Lưu ý: Nếu dùng key trả phí, bạn có thể tăng số threads để dịch nhanh hơn.")
+            print(f"   ⚠️ Nếu dùng key free, hãy cẩn thận với rate limit.")
         
     if chunk_size_lines is None:
         chunk_size_lines = CHUNK_SIZE_LINES
@@ -765,12 +952,23 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     
     # Validate API key trước khi bắt đầu translation
     print("🔑 Đang kiểm tra API key...")
-    is_valid, validation_message = validate_api_key_before_translation(validation_key, model_name, provider)
-    if not is_valid:
-        print(f"❌ {validation_message}")
-        return False
+    
+    # Test từng key riêng biệt để xác định quota isolation
+    if isinstance(api_key, list) and len(api_key) > 1:
+        print(f"🧪 Testing quota isolation với {len(api_key)} keys...")
+        for i, key in enumerate(api_key[:3], 1):  # Test 3 keys đầu
+            is_valid, validation_message = validate_api_key_before_translation(key, model_name, provider)
+            if is_valid:
+                print(f"✅ Key #{i}: {validation_message}")
+            else:
+                print(f"❌ Key #{i}: {validation_message}")
     else:
-        print(f"✅ {validation_message}")
+        is_valid, validation_message = validate_api_key_before_translation(validation_key, model_name, provider)
+        if not is_valid:
+            print(f"❌ {validation_message}")
+            return False
+        else:
+            print(f"✅ {validation_message}")
 
     progress_file_path = f"{input_file}{PROGRESS_FILE_SUFFIX}"
 
@@ -790,7 +988,21 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     
     # System instruction cho AI - sử dụng custom hoặc default
     if system_instruction is None:
-        system_instruction = "Dịch văn bản sau sang tiếng Việt. Bối cảnh hiện đại. Đảm bảo các câu thoại nhân vật được dịch chính xác và đặc trong dấu "". Đảm bảo giữ nguyên chi tiết nội dung. Giữ nguyên các từ ngữ thô tục, tình dục."
+        system_instruction = """Dịch văn bản sau sang tiếng Việt theo các quy tắc:
+
+DANH XƯNG NGƯỜI KỂ CHUYỆN:
+- Người kể chuyện luôn xưng "tôi" (bối cảnh hiện đại) hoặc "ta" (bối cảnh cổ đại)
+- KHÔNG dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị"
+
+QUY TẮC KHÁC:
+- Phân biệt lời kể và lời thoại nhân vật
+- Lời thoại trong dấu ngoặc kép "..."
+- Giữ nguyên chi tiết nội dung, từ ngữ thô tục
+- Danh xưng quan hệ chỉ dùng trong lời thoại nhân vật
+
+OUTPUT:
+- CHỈ trả về nội dung đã dịch
+- KHÔNG thêm giải thích, bình luận, tiêu đề"""
     
     print(f"🎯 System instruction: {system_instruction[:100]}...")  # Log first 100 chars
 
@@ -835,6 +1047,9 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
                 # Gửi các chunks cần dịch đến thread pool
                 chunks_to_process = chunks[completed_chunks:]  # Chỉ xử lý chunks chưa hoàn thành
                 
+                # Context đã được truyền từ GUI
+                print(f"🎯 Sử dụng context: {context} ({'hiện đại - tôi' if context == 'modern' else 'cổ đại - ta'})")
+                
                 print(f"Gửi {len(chunks_to_process)} chunks đến thread pool...")
                 
                 for chunk_data in chunks_to_process:
@@ -843,8 +1058,8 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
                         print("🛑 Dừng gửi chunks mới do người dùng yêu cầu")
                         break
                         
-                    # Submit với key_rotator nếu có
-                    future = executor.submit(process_chunk, api_key, model_name, system_instruction, chunk_data, provider, None, key_rotator)
+                    # Submit với key_rotator và context
+                    future = executor.submit(process_chunk, api_key, model_name, system_instruction, chunk_data, provider, None, key_rotator, context, is_paid_key)
                     futures[future] = chunk_data[0]  # chunk_index
                 
                 # Thu thập kết quả khi các threads hoàn thành

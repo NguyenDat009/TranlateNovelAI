@@ -146,6 +146,8 @@ class ModernTranslateNovelAI(ctk.CTk):
         self.api_provider_var = ctk.StringVar(value="OpenRouter")  # OpenRouter hoặc Google AI
         self.openrouter_key_var = ctk.StringVar()
         self.google_ai_key_var = ctk.StringVar()
+        self.google_ai_paid_key_var = ctk.StringVar()
+        self.google_key_usage_var = ctk.StringVar(value="Free Keys")
         self.api_key_var = ctk.StringVar()  # Key hiện tại đang dùng (deprecated, giữ lại để tương thích)
         self.model_var = ctk.StringVar(value="anthropic/claude-3.5-sonnet")
         self.context_var = ctk.StringVar(value="Bối cảnh hiện đại")
@@ -261,7 +263,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         # Google AI API Keys - Multiple keys support (Textbox instead of Entry)
         self.google_ai_keys_label = ctk.CTkLabel(
             self.sidebar_frame,
-            text="Google AI Keys (1 key/dòng):",
+            text="Google AI Free Keys (1 key/dòng):",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
@@ -274,6 +276,33 @@ class ModernTranslateNovelAI(ctk.CTk):
             font=ctk.CTkFont(family="Consolas", size=10)
         )
         self.google_ai_keys_textbox.grid(row=6, column=0, padx=20, pady=(0, 5), sticky="ew")
+        
+        # New: Google AI Paid Key Entry
+        self.google_ai_paid_key_label = ctk.CTkLabel(
+            self.sidebar_frame,
+            text="Google AI Paid Key (Billing Enabled):",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.google_ai_paid_key_label.grid(row=7, column=0, padx=20, pady=(5, 2), sticky="w")
+
+        self.google_ai_paid_key_entry = ctk.CTkEntry(
+            self.sidebar_frame,
+            placeholder_text="Enter paid API key",
+            textvariable=self.google_ai_paid_key_var,
+            show="*",
+            width=240
+        )
+        self.google_ai_paid_key_entry.grid(row=8, column=0, padx=20, pady=(0, 5), sticky="ew")
+
+        # New: Key type selection
+        self.google_key_type_segmented_btn = ctk.CTkSegmentedButton(
+            self.sidebar_frame,
+            values=["Free Keys", "Paid Key"],
+            variable=self.google_key_usage_var,
+            command=self.on_google_key_type_changed
+        )
+        self.google_key_type_segmented_btn.grid(row=9, column=0, padx=20, pady=5, sticky="ew")
         
         # Model Selection
         self.model_combo = ctk.CTkComboBox(
@@ -291,7 +320,7 @@ class ModernTranslateNovelAI(ctk.CTk):
             command=self.on_model_changed,
             width=240
         )
-        self.model_combo.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
+        self.model_combo.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
         
         # Custom model entry (initially hidden)
         self.custom_model_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
@@ -324,7 +353,7 @@ class ModernTranslateNovelAI(ctk.CTk):
             command=self.on_context_changed,
             width=240
         )
-        self.context_combo.grid(row=9, column=0, padx=20, pady=5, sticky="ew")
+        self.context_combo.grid(row=11, column=0, padx=20, pady=5, sticky="ew")
         
         # Test API button
         self.test_api_btn = ctk.CTkButton(
@@ -334,7 +363,7 @@ class ModernTranslateNovelAI(ctk.CTk):
             width=240,
             height=30
         )
-        self.test_api_btn.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
+        self.test_api_btn.grid(row=12, column=0, padx=20, pady=5, sticky="ew")
         
         # Performance Settings
         self.performance_label = ctk.CTkLabel(
@@ -342,11 +371,11 @@ class ModernTranslateNovelAI(ctk.CTk):
             text="⚡ Performance",
             font=ctk.CTkFont(size=16, weight="bold")
         )
-        self.performance_label.grid(row=11, column=0, padx=20, pady=(20, 5), sticky="ew")
+        self.performance_label.grid(row=13, column=0, padx=20, pady=(20, 5), sticky="ew")
         
         # Threads setting
         self.threads_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.threads_frame.grid(row=12, column=0, padx=20, pady=5, sticky="ew")
+        self.threads_frame.grid(row=14, column=0, padx=20, pady=5, sticky="ew")
         self.threads_frame.grid_columnconfigure(1, weight=1)
         
         self.threads_label = ctk.CTkLabel(
@@ -366,7 +395,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         
         # Chunk size setting
         self.chunk_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.chunk_frame.grid(row=13, column=0, padx=20, pady=5, sticky="ew")
+        self.chunk_frame.grid(row=15, column=0, padx=20, pady=5, sticky="ew")
         self.chunk_frame.grid_columnconfigure(1, weight=1)
         
         self.chunk_label = ctk.CTkLabel(
@@ -390,14 +419,14 @@ class ModernTranslateNovelAI(ctk.CTk):
             text="⚙️ Settings",
             font=ctk.CTkFont(size=16, weight="bold")
         )
-        self.settings_label.grid(row=14, column=0, padx=20, pady=(20, 5), sticky="ew")
+        self.settings_label.grid(row=16, column=0, padx=20, pady=(20, 5), sticky="ew")
         
         self.auto_reformat_check = ctk.CTkCheckBox(
             self.sidebar_frame,
             text="Auto reformat",
             variable=self.auto_reformat_var
         )
-        self.auto_reformat_check.grid(row=15, column=0, padx=20, pady=5, sticky="w")
+        self.auto_reformat_check.grid(row=17, column=0, padx=20, pady=5, sticky="w")
         
         self.auto_epub_check = ctk.CTkCheckBox(
             self.sidebar_frame,
@@ -405,11 +434,11 @@ class ModernTranslateNovelAI(ctk.CTk):
             variable=self.auto_convert_epub_var,
             command=self.on_epub_setting_changed
         )
-        self.auto_epub_check.grid(row=16, column=0, padx=20, pady=5, sticky="w")
+        self.auto_epub_check.grid(row=18, column=0, padx=20, pady=5, sticky="w")
         
         # Control buttons - Grid 1x2 Layout
         self.control_grid_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.control_grid_frame.grid(row=17, column=0, padx=20, pady=10, sticky="ew")
+        self.control_grid_frame.grid(row=19, column=0, padx=20, pady=10, sticky="ew")
         
         # Configure grid columns với weight đều nhau
         for i in range(2):
@@ -464,7 +493,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         
         # Add bottom spacer for better scrolling
         self.bottom_spacer = ctk.CTkFrame(self.sidebar_frame, height=20, fg_color="transparent")
-        self.bottom_spacer.grid(row=18, column=0, padx=20, pady=20, sticky="ew")
+        self.bottom_spacer.grid(row=20, column=0, padx=20, pady=20, sticky="ew")
         
     def setup_main_content(self):
         """Thiết lập nội dung chính"""
@@ -713,6 +742,9 @@ class ModernTranslateNovelAI(ctk.CTk):
             self.openrouter_key_entry.grid()
             self.google_ai_keys_label.grid_remove()
             self.google_ai_keys_textbox.grid_remove()
+            self.google_ai_paid_key_label.grid_remove()
+            self.google_ai_paid_key_entry.grid_remove()
+            self.google_key_type_segmented_btn.grid_remove()
             
             # Update model list for OpenRouter
             self.model_combo.configure(values=[
@@ -735,35 +767,39 @@ class ModernTranslateNovelAI(ctk.CTk):
         elif choice == "Google AI":
             # Hide OpenRouter key, show Google AI keys
             self.openrouter_key_entry.grid_remove()
-            self.google_ai_keys_label.grid()
-            self.google_ai_keys_textbox.grid()
+            self.google_key_type_segmented_btn.grid()
+            self.on_google_key_type_changed() # Show correct entry based on selector's current value
             
             # Update model list for Google AI
             self.model_combo.configure(values=[
-                "gemini-2.0-flash-exp",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-lite",
                 "gemini-1.5-pro",
                 "gemini-1.5-flash",
                 "🔧 Custom Model..."
             ])
             # Set default model for Google AI
-            self.model_var.set("gemini-2.0-flash-exp")
+            self.model_var.set("gemini-2.5-flash")
             
             self.log("🔄 Chuyển sang Google AI API")
             
             # Hiển thị cảnh báo về rate limits và mẹo dùng nhiều keys
-            self.log("⚠️ Google AI Free Tier có giới hạn RPM thấp:")
-            self.log("   • Gemini 2.0 Flash: 10 RPM")
-            self.log("   • Gemini 1.5 Flash: 15 RPM")
-            self.log("   • Gemini 1.5 Pro: 2 RPM (rất thấp!)")
+            self.log("⚠️ Google AI Free Tier có giới hạn RPM (Requests Per Minute) thấp.")
+            self.log("   - Các model Pro thường có RPM rất thấp (ví dụ: 2 RPM).")
+            self.log("   - Các model Flash thường có RPM cao hơn (ví dụ: 10-15 RPM).")
             self.log("💡 TIP: Nhập NHIỀU keys (1 key/dòng) để tăng tốc độ!")
-            self.log("   • Hệ thống sẽ tự động xoay vòng giữa các keys")
-            self.log("   • Mỗi key có rate limit riêng → tổng RPM tăng lên")
+            self.log("   • Hệ thống sẽ tự động xoay vòng giữa các keys.")
+            self.log("   • Mỗi key có rate limit riêng → tổng RPM tăng lên.")
+            self.log("   • Luôn kiểm tra giới hạn RPM mới nhất tại trang chủ Google AI.")
             self.log("   • Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits")
     
     def on_model_changed(self, choice):
         """Xử lý khi thay đổi model"""
         if choice == "🔧 Custom Model...":
-            self.custom_model_frame.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
+            self.custom_model_frame.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
             self.custom_model_entry.focus()
         else:
             self.custom_model_frame.grid_remove()
@@ -792,6 +828,24 @@ class ModernTranslateNovelAI(ctk.CTk):
         self.log(f"🔧 Đã đặt custom model: {custom_model}")
         show_success(f"Đã đặt custom model:\n{custom_model}", parent=self)
     
+    def on_google_key_type_changed(self, choice=None):
+        """Xử lý khi thay đổi loại key Google AI (Free/Paid)"""
+        if choice is None:
+            choice = self.google_key_usage_var.get()
+        
+        if choice == "Free Keys":
+            self.google_ai_keys_label.grid()
+            self.google_ai_keys_textbox.grid()
+            self.google_ai_paid_key_label.grid_remove()
+            self.google_ai_paid_key_entry.grid_remove()
+            self.log("🔑 Chuyển sang dùng các API keys miễn phí.")
+        elif choice == "Paid Key":
+            self.google_ai_keys_label.grid_remove()
+            self.google_ai_keys_textbox.grid_remove()
+            self.google_ai_paid_key_label.grid()
+            self.google_ai_paid_key_entry.grid()
+            self.log("💳 Chuyển sang dùng API key trả phí.")
+    
     def on_context_changed(self, choice):
         """Xử lý khi thay đổi bối cảnh dịch"""
         if choice == "Tùy chỉnh":
@@ -805,11 +859,17 @@ class ModernTranslateNovelAI(ctk.CTk):
 *   Sử dụng văn phong hiện đại, tự nhiên, phù hợp với bối cảnh của câu chuyện và phù hợp với ngữ pháp tiếng Việt.
 *   Giữ nguyên tất cả các chi tiết, mô tả và nội dung gốc. Không được lược bỏ hay thay đổi ý nghĩa của văn bản.
 
-2. Lời thoại và Xưng hô:
-*   Xác định rõ mối quan hệ giữa các nhân vật  (cha-con, anh-em, chị-em, mẹ-con,...)  để sử dụng đại từ nhân xưng và cách xưng hô cho phù hợp, nhất quán trong toàn bộ văn bản.
-*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
+2. Danh xưng người kể chuyện (QUAN TRỌNG):
+*   NGƯỜI KỂ CHUYỆN (narrator) luôn xưng "tôi" trong bối cảnh hiện đại hoặc "ta" trong bối cảnh cổ đại.
+*   KHÔNG BAO GIỜ dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị" hay bất kỳ danh xưng nào khác.
+*   Phân biệt rõ giữa lời kể của tác giả và lời thoại của nhân vật.
 
-3. Định dạng Output:
+3. Lời thoại và Xưng hô nhân vật:
+*   Xác định rõ mối quan hệ giữa các nhân vật (cha-con, anh-em, chị-em, mẹ-con,...) để sử dụng đại từ nhân xưng phù hợp.
+*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
+*   Chỉ áp dụng danh xưng quan hệ (ba, mẹ, anh, chị, con...) cho lời thoại TRONG dấu ngoặc kép.
+
+4. Định dạng Output:
 *   Chỉ trả về văn bản đã dịch. Không thêm bất kỳ lời bình luận, giải thích hay nội dung nào khác ngoài bản dịch.
 
 ---
@@ -831,11 +891,17 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
 *   Sử dụng văn phong hiện đại, tự nhiên, phù hợp với bối cảnh của câu chuyện và phù hợp với ngữ pháp tiếng Việt.
 *   Giữ nguyên tất cả các chi tiết, mô tả và nội dung gốc. Không được lược bỏ hay thay đổi ý nghĩa của văn bản.
 
-2. Lời thoại và Xưng hô:
-*   Xác định rõ mối quan hệ giữa các nhân vật  (cha-con, anh-em, chị-em, mẹ-con,...)  để sử dụng đại từ nhân xưng và cách xưng hô cho phù hợp, nhất quán trong toàn bộ văn bản.
-*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
+2. Danh xưng người kể chuyện (QUAN TRỌNG):
+*   NGƯỜI KỂ CHUYỆN (narrator) luôn xưng "tôi" trong bối cảnh hiện đại hoặc "ta" trong bối cảnh cổ đại.
+*   KHÔNG BAO GIỜ dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị" hay bất kỳ danh xưng nào khác.
+*   Phân biệt rõ giữa lời kể của tác giả và lời thoại của nhân vật.
 
-3. Định dạng Output:
+3. Lời thoại và Xưng hô nhân vật:
+*   Xác định rõ mối quan hệ giữa các nhân vật (cha-con, anh-em, chị-em, mẹ-con,...) để sử dụng đại từ nhân xưng phù hợp.
+*   Đặt toàn bộ lời thoại của nhân vật trong dấu ngoặc kép "...".
+*   Chỉ áp dụng danh xưng quan hệ (ba, mẹ, anh, chị, con...) cho lời thoại TRONG dấu ngoặc kép.
+
+4. Định dạng Output:
 *   Chỉ trả về văn bản đã dịch. Không thêm bất kỳ lời bình luận, giải thích hay nội dung nào khác ngoài bản dịch.
 
 ---
@@ -846,13 +912,14 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
 
 # BỐI CẢNH ĐẶC BIỆT - HIỆN ĐẠI:
 
-4. Văn phong hiện đại:
+5. Văn phong hiện đại:
 *   Sử dụng ngôn ngữ tự nhiên, gần gũi, phù hợp với cuộc sống hiện đại
-*   Danh xưng: anh/chị, em, bạn, cậu/mày, ông/bà (tùy mối quan hệ)
+*   Người kể chuyện luôn xưng "tôi" (KHÔNG dùng ba, bố, con, anh, chị...)
+*   Lời thoại nhân vật: anh/chị, em, bạn, cậu/mày, ông/bà (tùy mối quan hệ)
 *   Giữ nguyên các từ ngữ thô tục, tình dục, slang nếu có trong nguyên bản
 *   Sử dụng thuật ngữ công nghệ, mạng xã hội, đời sống đô thị hiện đại
 
-5. Đặc điểm riêng:
+6. Đặc điểm riêng:
 *   Lời thoại tự nhiên như người Việt nói hàng ngày
 *   Không cần quá trang trọng trừ khi ngữ cảnh yêu cầu
 *   Giữ nguyên tên riêng, địa danh, thương hiệu nước ngoài""",
@@ -861,13 +928,14 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
 
 # BỐI CẢNH ĐẶC BIỆT - CỔ ĐẠI:
 
-4. Văn phong cổ điển:
+5. Văn phong cổ điển:
 *   Sử dụng ngôn ngữ trang trọng, lịch thiệp phù hợp thời kỳ cổ đại
-*   Danh xưng cổ điển: ta/ngươi, hạ thần/thần tử, công tử/tiểu thư, sư phụ/đồ đệ
+*   Người kể chuyện luôn xưng "ta" (KHÔNG dùng thần, hạ thần, tiểu nhân...)
+*   Lời thoại nhân vật: ta/ngươi, hạ thần/thần tử, công tử/tiểu thư, sư phụ/đồ đệ
 *   Thuật ngữ võ thuật: công pháp, tâm pháp, tu vi, cảnh giới, đan dược
 *   Chức vị cổ đại: hoàng thượng, hoàng hậu, thái tử, đại thần, tướng quân
 
-5. Đặc điểm riêng:
+6. Đặc điểm riêng:
 *   Lời thoại trang nghiêm, có phép tắc
 *   Sử dụng từ Hán Việt khi phù hợp
 *   Giữ nguyên tên võ công, tâm pháp, địa danh cổ đại
@@ -1206,6 +1274,7 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         # Get current model (handle custom model)
         current_model = self.get_current_model()
         provider = self.get_current_provider()
+        is_paid_key = (provider == "Google AI" and self.google_key_usage_var.get() == "Paid Key")
         
         self.log("🚀 Bắt đầu quá trình dịch...")
         self.log(f"📁 Input: {os.path.basename(self.input_file_var.get())}")
@@ -1224,7 +1293,7 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         # Run in thread
         self.translation_thread = threading.Thread(
             target=self.run_translation,
-            args=(self.input_file_var.get(), output_file, api_key, current_model, self.get_system_instruction(), num_threads, chunk_size, provider),
+            args=(self.input_file_var.get(), output_file, api_key, current_model, self.get_system_instruction(), num_threads, chunk_size, provider, is_paid_key),
             daemon=True
         )
         self.translation_thread.start()
@@ -1379,6 +1448,8 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
             "api_provider": self.api_provider_var.get(),
             "openrouter_key": self.openrouter_key_var.get(),
             "google_ai_keys": google_ai_keys,  # New: list of keys
+            "google_ai_paid_key": self.google_ai_paid_key_var.get(),
+            "google_key_usage": self.google_key_usage_var.get(),
             "google_ai_key": self.google_ai_key_var.get() if hasattr(self, 'google_ai_key_var') else "",  # Deprecated, giữ lại để tương thích
             "api_key": self.api_key_var.get(),  # Deprecated, giữ lại để tương thích
             "model": self.model_var.get(),
@@ -1428,6 +1499,9 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
                         self.google_ai_keys_textbox.delete("0.0", "end")
                         self.google_ai_keys_textbox.insert("0.0", old_key)
                 
+                self.google_ai_paid_key_var.set(settings.get("google_ai_paid_key", ""))
+                self.google_key_usage_var.set(settings.get("google_key_usage", "Free Keys"))
+                
                 # Backward compatibility: nếu có api_key cũ, dùng nó cho OpenRouter
                 if not self.openrouter_key_var.get() and settings.get("api_key"):
                     self.openrouter_key_var.set(settings.get("api_key", ""))
@@ -1471,6 +1545,7 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
                 
                 # Trigger API provider change to show/hide API key fields
                 self.on_api_provider_changed(self.api_provider_var.get())
+                self.on_google_key_type_changed(self.google_key_usage_var.get())
                 
                 self.log("📂 Đã tải cài đặt")
         except Exception as e:
@@ -1557,12 +1632,16 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
         """
         Lấy API key(s) hiện tại dựa trên provider đã chọn.
         - OpenRouter: trả về string (1 key)
-        - Google AI: trả về list (nhiều keys) hoặc string (1 key)
+        - Google AI: trả về list (free keys) hoặc string (paid key)
         """
         provider = self.api_provider_var.get()
         if provider == "OpenRouter":
             return self.openrouter_key_var.get().strip()
         elif provider == "Google AI":
+            key_type = self.google_key_usage_var.get()
+            if key_type == "Paid Key":
+                return self.google_ai_paid_key_var.get().strip()
+            else: # Free Keys
             # Get all keys from textbox
             keys_text = self.google_ai_keys_textbox.get("0.0", "end").strip()
             if not keys_text:
@@ -1594,7 +1673,7 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
             # Fallback to default based on provider
             provider = self.get_current_provider()
             if provider == "Google AI":
-                return "gemini-2.0-flash-exp"
+                return "gemini-2.5-flash"
             else:
                 return "anthropic/claude-3.5-sonnet"
         return current_model
@@ -1618,13 +1697,22 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
             }
             return pattern_map.get(self.chapter_pattern_var.get(), r"^Chương\s+\d+:\s+.*$")
 
-    def run_translation(self, input_file, output_file, api_key, model_name, system_instruction, num_threads, chunk_size, provider="OpenRouter"):
+    def run_translation(self, input_file, output_file, api_key, model_name, system_instruction, num_threads, chunk_size, provider="OpenRouter", is_paid_key=False):
         """Chạy quá trình dịch"""
         try:
             self.start_time = time.time()
             
             # Log provider being used
             self.log(f"🔑 Sử dụng {provider} API")
+            
+            # Xác định context từ GUI settings
+            context_setting = self.context_var.get()
+            if context_setting == "Bối cảnh cổ đại":
+                context = "ancient"
+            else:
+                context = "modern"  # Default cho "Bối cảnh hiện đại" và "Tùy chỉnh"
+            
+            self.log(f"🎯 Context: {context_setting} → {'ta' if context == 'ancient' else 'tôi'}")
             
             # Use regular translation
             success = translate_file_optimized(
@@ -1635,351 +1723,5 @@ BẮT ĐẦU DỊCH VĂN BẢN DƯỚI ĐÂY:"""
                 system_instruction=system_instruction,
                 num_workers=num_threads,
                 chunk_size_lines=chunk_size,
-                provider=provider
-            )
-            
-            if success:
-                self.log("✅ Dịch hoàn thành!")
-                
-                # Auto reformat if enabled
-                if self.auto_reformat_var.get():
-                    self.log("🔄 Đang reformat file...")
-                    try:
-                        fix_text_format(output_file)
-                        self.log("✅ Reformat hoàn thành!")
-                    except Exception as e:
-                        self.log(f"⚠️ Lỗi reformat: {e}")
-                
-                # Auto convert to EPUB if enabled
-                if self.auto_convert_epub_var.get() and EPUB_AVAILABLE:
-                    self.log("📚 Đang convert sang EPUB...")
-                    try:
-                        self.convert_to_epub(output_file)
-                    except Exception as e:
-                        self.log(f"⚠️ Lỗi convert EPUB: {e}")
-                
-                elapsed_time = time.time() - self.start_time
-                self.log(f"⏱️ Thời gian hoàn thành: {elapsed_time:.1f} giây")
-                
-                # Update UI on main thread
-                def update_success_ui():
-                    if hasattr(self, 'progress_text') and self.progress_text is not None:
-                        self.progress_text.configure(text="Hoàn thành!")
-                    if hasattr(self, 'progress_bar') and self.progress_bar is not None:
-                        self.progress_bar.set(1.0)
-                    show_success(f"Dịch hoàn thành!\nFile: {os.path.basename(output_file)}", 
-                               details=f"Đường dẫn: {output_file}", parent=self)
-                
-                self.after(0, update_success_ui)
-            else:
-                # Translation failed or stopped
-                if is_quota_exceeded():
-                    self.log("💳 Dịch dừng do API hết quota")
-                    show_error("API đã hết quota!\n\nVui lòng nạp thêm credit vào tài khoản OpenRouter.", 
-                             details="Tiến độ đã được lưu, bạn có thể tiếp tục khi có credit.", parent=self)
-                else:
-                    self.log("❌ Dịch thất bại")
-                    show_error("Quá trình dịch thất bại", parent=self)
-                
-        except Exception as e:
-            self.log(f"❌ Lỗi: {e}")
-            show_error(f"Đã xảy ra lỗi: {e}", details=str(e), parent=self)
-        finally:
-            self.after(0, self.translation_finished)
-
-    def test_api_connection(self):
-        """Test API connection - supports both OpenRouter and Google AI"""
-        api_key = self.get_current_api_key()
-        provider = self.get_current_provider()
-        
-        # Validate API key
-        if provider == "Google AI":
-            if not api_key or (isinstance(api_key, list) and len(api_key) == 0):
-                show_error(f"Vui lòng nhập ít nhất 1 {provider} API Key trước!", parent=self)
-                return
-        else:
-            if not api_key:
-                show_error(f"Vui lòng nhập {provider} API Key trước!", parent=self)
-                return
-        
-        model_name = self.get_current_model()
-        
-        # Log số lượng keys cho Google AI
-        if provider == "Google AI" and isinstance(api_key, list):
-            self.log(f"🧪 Đang test {len(api_key)} Google AI API keys với model: {model_name}...")
-        else:
-            self.log(f"🧪 Đang test kết nối {provider} API với model: {model_name}...")
-        
-        # Test in background thread
-        def test_api():
-            try:
-                if provider == "Google AI":
-                    # Test Google AI API - support multiple keys
-                    import google.generativeai as genai
-                    
-                    # Get list of keys to test
-                    keys_to_test = api_key if isinstance(api_key, list) else [api_key]
-                    
-                    success_count = 0
-                    failed_keys = []
-                    
-                    for idx, key in enumerate(keys_to_test):
-                        try:
-                            self.after(0, lambda i=idx: self.log(f"🧪 Test key #{i+1}..."))
-                            
-                            genai.configure(api_key=key)
-                            model = genai.GenerativeModel(model_name)
-                            response = model.generate_content("Hello")
-                            
-                            if response and response.text:
-                                success_count += 1
-                                masked_key = key[:10] + "***" + key[-10:] if len(key) > 20 else "***"
-                                self.after(0, lambda i=idx, mk=masked_key: self.log(f"✅ Key #{i+1} ({mk}): OK"))
-                            else:
-                                failed_keys.append(f"Key #{idx+1}: Response rỗng")
-                        except Exception as e:
-                            failed_keys.append(f"Key #{idx+1}: {str(e)[:50]}")
-                            self.after(0, lambda i=idx, err=str(e): self.log(f"❌ Key #{i+1}: {err[:50]}..."))
-                    
-                    # Show final result
-                    if success_count == len(keys_to_test):
-                        self.after(0, lambda: self.log(f"✅ Tất cả {success_count} keys đều hoạt động!"))
-                        self.after(0, lambda sc=success_count: show_success(f"✅ Test thành công!\n\n{sc}/{len(keys_to_test)} keys hoạt động\nModel: {model_name}", parent=self))
-                    elif success_count > 0:
-                        self.after(0, lambda: self.log(f"⚠️ {success_count}/{len(keys_to_test)} keys hoạt động"))
-                        fail_msg = "\n".join(failed_keys)
-                        self.after(0, lambda sc=success_count, fm=fail_msg: show_warning(f"⚠️ Test một phần thành công!\n\n{sc}/{len(keys_to_test)} keys hoạt động\n\nKeys lỗi:\n{fm}", parent=self))
-                    else:
-                        self.after(0, lambda: self.log("❌ Tất cả keys đều lỗi!"))
-                        fail_msg = "\n".join(failed_keys)
-                        self.after(0, lambda fm=fail_msg: show_error(f"❌ Tất cả keys đều lỗi!\n\n{fm}", parent=self))
-                        
-                elif provider == "OpenRouter":
-                    # Test OpenRouter API
-                    import requests
-                    
-                    headers = {
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://github.com/TranslateNovelAI",
-                        "X-Title": "TranslateNovelAI"
-                    }
-                    
-                    payload = {
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 50
-                    }
-                    
-                    response = requests.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers=headers,
-                        json=payload,
-                        timeout=30
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        if 'choices' in data and data['choices']:
-                            self.after(0, lambda: self.log("✅ Kết nối OpenRouter API thành công!"))
-                            self.after(0, lambda: show_success("Kết nối OpenRouter API thành công!", parent=self))
-                        else:
-                            self.after(0, lambda: self.log("❌ API trả về response rỗng"))
-                            self.after(0, lambda: show_error("API trả về response rỗng", parent=self))
-                    elif response.status_code == 401:
-                        self.after(0, lambda: self.log("❌ API Key không hợp lệ"))
-                        self.after(0, lambda: show_error("API Key không hợp lệ hoặc đã hết hạn", parent=self))
-                    elif response.status_code == 402:
-                        self.after(0, lambda: self.log("❌ Tài khoản hết credit"))
-                        self.after(0, lambda: show_error("Tài khoản hết credit. Vui lòng nạp thêm credit.", parent=self))
-                    else:
-                        error_msg = f"HTTP {response.status_code}: {response.text}"
-                        self.after(0, lambda: self.log(f"❌ Lỗi API: {error_msg}"))
-                        self.after(0, lambda: show_error(f"Lỗi kết nối API:\n{error_msg}", parent=self))
-                    
-            except Exception as e:
-                error_msg = str(e)
-                self.after(0, lambda: self.log(f"❌ Lỗi API: {error_msg}"))
-                
-                # Provide more specific error messages
-                if "API key not valid" in error_msg:
-                    self.after(0, lambda: show_error("API Key không hợp lệ!\n\nVui lòng kiểm tra:\n• API Key đã đúng chưa\n• API Key có quyền truy cập model này không\n• API Key chưa hết hạn", parent=self))
-                elif "quota" in error_msg.lower():
-                    self.after(0, lambda: show_error("API đã hết quota!\n\nVui lòng:\n• Kiểm tra usage limit\n• Nâng cấp plan nếu cần\n• Thử lại sau", parent=self))
-                elif "SAFETY" in error_msg:
-                    self.after(0, lambda: show_error("Content bị chặn bởi safety filter.\nĐây là lỗi bình thường khi test.", parent=self))
-                else:
-                    self.after(0, lambda: show_error(f"Lỗi kết nối API:\n{error_msg}", parent=self))
-        
-        threading.Thread(target=test_api, daemon=True).start()
-
-    def set_light_mode(self):
-        """Set light mode và cập nhật button colors"""
-        ctk.set_appearance_mode("light")
-        self.update_appearance_buttons("light")
-        self.log("☀️ Đã chuyển sang Light Mode")
-    
-    def set_dark_mode(self):
-        """Set dark mode và cập nhật button colors"""
-        ctk.set_appearance_mode("dark")
-        self.update_appearance_buttons("dark")
-        self.log("🌙 Đã chuyển sang Dark Mode")
-    
-    def update_appearance_buttons(self, current_mode=None):
-        """Cập nhật màu sắc appearance buttons dựa trên mode hiện tại"""
-        if current_mode is None:
-            # Get current appearance mode
-            try:
-                current_mode = ctk.get_appearance_mode().lower()
-            except:
-                current_mode = "dark"  # Default
-        
-        try:
-            if current_mode == "light":
-                # Light mode active
-                self.light_mode_btn.configure(
-                    fg_color=("orange", "darkorange"),
-                    hover_color=("darkorange", "orange")
-                )
-                self.dark_mode_btn.configure(
-                    fg_color=("gray", "darkgray"),
-                    hover_color=("darkgray", "gray")
-                )
-            else:
-                # Dark mode active
-                self.dark_mode_btn.configure(
-                    fg_color=("blue", "darkblue"),
-                    hover_color=("darkblue", "blue")
-                )
-                self.light_mode_btn.configure(
-                    fg_color=("gray", "darkgray"),
-                    hover_color=("darkgray", "gray")
-                )
-        except Exception as e:
-            self.log(f"⚠️ Lỗi cập nhật appearance buttons: {e}")
-
-    def show_quota_exceeded_dialog(self):
-        """Hiển thị dialog hướng dẫn khi API hết quota"""
-        quota_message = """🚨 OpenRouter API đã hết credit!
-
-💡 Giải pháp: Nạp thêm credit vào tài khoản OpenRouter
-
-📋 Hướng dẫn chi tiết:
-
-1️⃣ Truy cập: https://openrouter.ai/
-2️⃣ Đăng nhập vào tài khoản của bạn
-3️⃣ Vào phần "Credits" để nạp tiền
-4️⃣ Chọn số tiền muốn nạp (bắt đầu từ $5)
-5️⃣ Thanh toán qua thẻ tín dụng
-6️⃣ Tiếp tục dịch từ nơi đã dừng
-
-💡 Mẹo: Một số models có giá rẻ hơn như Claude Haiku hoặc GPT-4o Mini
-
-💾 Tiến độ dịch đã được lưu, bạn có thể tiếp tục ngay khi có credit!
-
-🔗 Link hữu ích:
-- OpenRouter Dashboard: https://openrouter.ai/keys
-- Pricing: https://openrouter.ai/models
-- Hướng dẫn sử dụng: https://openrouter.ai/docs"""
-
-        try:
-            # Create custom dialog window
-            dialog = ctk.CTkToplevel(self)
-            dialog.title("💳 API Hết Quota")
-            dialog.geometry("650x700")
-            dialog.transient(self)
-            dialog.grab_set()
-            
-            # Center the dialog
-            dialog.update_idletasks()
-            x = (dialog.winfo_screenwidth() // 2) - (650 // 2)
-            y = (dialog.winfo_screenheight() // 2) - (700 // 2)
-            dialog.geometry(f"+{x}+{y}")
-            
-            # Main frame
-            main_frame = ctk.CTkFrame(dialog)
-            main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-            
-            # Title
-            title_label = ctk.CTkLabel(
-                main_frame,
-                text="💳 OpenRouter API Đã Hết Credit",
-                font=ctk.CTkFont(size=20, weight="bold"),
-                text_color=("red", "orange")
-            )
-            title_label.pack(pady=(20, 10))
-            
-            # Scrollable text area for message
-            text_frame = ctk.CTkScrollableFrame(main_frame)
-            text_frame.pack(fill="both", expand=True, padx=20, pady=10)
-            
-            message_label = ctk.CTkLabel(
-                text_frame,
-                text=quota_message,
-                justify="left",
-                wraplength=550,
-                font=ctk.CTkFont(size=12)
-            )
-            message_label.pack(fill="x", padx=10, pady=10)
-            
-            # Button frame
-            button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-            button_frame.pack(fill="x", padx=20, pady=(10, 20))
-            
-            # Copy links button
-            def copy_openrouter_link():
-                import tkinter as tk
-                try:
-                    dialog.clipboard_clear()
-                    dialog.clipboard_append("https://openrouter.ai/")
-                    show_toast_success("Đã copy link OpenRouter!")
-                except:
-                    pass
-            
-            def copy_pricing_link():
-                import tkinter as tk
-                try:
-                    dialog.clipboard_clear()
-                    dialog.clipboard_append("https://openrouter.ai/models")
-                    show_toast_success("Đã copy link Pricing!")
-                except:
-                    pass
-            
-            copy_or_btn = ctk.CTkButton(
-                button_frame,
-                text="📋 Copy Link OpenRouter",
-                command=copy_openrouter_link,
-                width=180
-            )
-            copy_or_btn.pack(side="left", padx=(0, 10))
-            
-            copy_pricing_btn = ctk.CTkButton(
-                button_frame,
-                text="📋 Copy Link Pricing", 
-                command=copy_pricing_link,
-                width=180
-            )
-            copy_pricing_btn.pack(side="left", padx=10)
-            
-            close_btn = ctk.CTkButton(
-                button_frame,
-                text="✅ Đã Hiểu",
-                command=dialog.destroy,
-                width=100,
-                fg_color=("green", "darkgreen"),
-                hover_color=("darkgreen", "green")
-            )
-            close_btn.pack(side="right")
-            
-        except Exception as e:
-            # Fallback to simple error dialog
-            show_error("API đã hết quota!\n\nVui lòng nạp thêm credit vào tài khoản OpenRouter.\n\nTruy cập: https://openrouter.ai/", parent=self)
-            self.log(f"⚠️ Lỗi hiển thị quota dialog: {e}")
-
-def main():
-    app = ModernTranslateNovelAI()
-    app.protocol("WM_DELETE_WINDOW", app.on_closing)
-    app.mainloop()
-
-if __name__ == "__main__":
-    main() 
+                provider=provider,
+                context=context,

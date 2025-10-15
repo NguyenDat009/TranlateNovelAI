@@ -83,7 +83,7 @@ class MultiThreadRateLimiter:
                 # Distributed sleep: mỗi thread sleep khác nhau để tránh thundering herd
                 thread_id = threading.current_thread().ident or 0
                 jitter = (thread_id % 1000) / 1000.0  # 0-1 second jitter
-                actual_sleep = min(wait_time / 2 + jitter, 2.0)  # Max 2s sleep
+                actual_sleep = min(wait_time + jitter + 1.0, 5.0)  # Thêm 1s buffer, max 5s sleep
                 
                 if attempt == 0:  # Chỉ log lần đầu
                     print(f"🚦 Thread {thread_id}: Rate limit, đợi {actual_sleep:.1f}s...")
@@ -200,7 +200,7 @@ def _get_key_hash(api_key: str) -> str:
     return hashlib.md5(api_key.encode()).hexdigest()[:8]
 
 
-def get_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str = None) -> MultiThreadRateLimiter:
+def get_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str = None, is_paid_key: bool = False) -> MultiThreadRateLimiter:
     """
     Get hoặc tạo rate limiter cho model (và key cụ thể nếu có)
     
@@ -227,31 +227,42 @@ def get_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str 
             limiter_key = model_name
         
         if limiter_key not in _rate_limiters:
-            # Xác định RPM dựa trên model
-            # Free tier limits from: https://ai.google.dev/gemini-api/docs/rate-limits?hl=vi
             rpm = 10  # Default safe value
             
-            if "2.0-flash" in model_name.lower() or "2.0flash" in model_name.lower() or "2.0_flash" in model_name.lower():
-                rpm = 10
-            elif "1.5-flash" in model_name.lower() or "1.5flash" in model_name.lower() or "1.5_flash" in model_name.lower():
-                rpm = 15
-            elif "1.5-pro" in model_name.lower() or "1.5_pro" in model_name.lower():
-                rpm = 2  # Very low!
-            elif "pro" in model_name.lower():
-                rpm = 2  # Conservative for Pro models
+            if is_paid_key:
+                # Paid keys have much higher limits, e.g., 1000 RPM for Gemini 1.5 Pro.
+                # We'll set a high but safe limit.
+                rpm = 900
+                safe_rpm = rpm  # Don't apply safety reduction for paid keys
+                
+                key_display = f"key_***{key_hash}" if api_key else "default"
+                print(f"🔧 Đã tạo rate limiter cho model: {model_name} ({key_display})")
+                print(f"   💳 Sử dụng API key trả phí. Áp dụng giới hạn RPM cao: {safe_rpm} RPM")
             else:
-                rpm = 10  # Default safe value
-            
-            # Giảm RPM xuống 80% để an toàn hơn
-            safe_rpm = int(rpm * 0.8)
-            if safe_rpm < 1:
-                safe_rpm = 1
-            
-            key_display = f"key_***{key_hash}" if api_key else "default"
-            print(f"🔧 Đã tạo rate limiter cho model: {model_name} ({key_display})")
-            print(f"   📊 Giới hạn gốc: {rpm} RPM")
-            print(f"   🛡️ Giới hạn an toàn: {safe_rpm} RPM (80% của gốc)")
-            print(f"   🌐 Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits")
+                # Logic for free keys
+                # Xác định RPM dựa trên model
+                # Free tier limits from: https://ai.google.dev/gemini-api/docs/rate-limits?hl=vi
+                if "2.0-flash" in model_name.lower() or "2.0flash" in model_name.lower() or "2.0_flash" in model_name.lower():
+                    rpm = 10
+                elif "1.5-flash" in model_name.lower() or "1.5flash" in model_name.lower() or "1.5_flash" in model_name.lower():
+                    rpm = 15
+                elif "1.5-pro" in model_name.lower() or "1.5_pro" in model_name.lower():
+                    rpm = 2  # Very low!
+                elif "pro" in model_name.lower():
+                    rpm = 2  # Conservative for Pro models
+                else:
+                    rpm = 10  # Default safe value
+                
+                # Giảm RPM xuống 50% để an toàn hơn với multiple keys
+                safe_rpm = int(rpm * 0.5)
+                if safe_rpm < 1:
+                    safe_rpm = 1
+                
+                key_display = f"key_***{key_hash}" if api_key else "default"
+                print(f"🔧 Đã tạo rate limiter cho model: {model_name} ({key_display})")
+                print(f"   📊 Giới hạn gốc: {rpm} RPM")
+                print(f"   🛡️ Giới hạn an toàn: {safe_rpm} RPM (50% của gốc)")
+                print(f"   🌐 Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits")
             
             _rate_limiters[limiter_key] = MultiThreadRateLimiter(requests_per_minute=safe_rpm)
         

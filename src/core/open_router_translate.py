@@ -335,10 +335,11 @@ def is_bad_translation(text, input_text=None):
     
     return False
 
-def translate_chunk(api_key, model_name, system_instruction, chunk_lines):
+def translate_chunk(api_key, model_name, system_instruction, chunk_lines, context="modern"):
     """
     Dịch một chunk gồm nhiều dòng văn bản sử dụng OpenRouter API.
     chunk_lines: danh sách các dòng văn bản
+    context: "modern" (hiện đại) hoặc "ancient" (cổ đại)
     Trả về (translated_text, is_safety_blocked_flag, is_bad_translation_flag).
     """
     # Gom các dòng thành một chuỗi lớn để gửi đi
@@ -349,8 +350,53 @@ def translate_chunk(api_key, model_name, system_instruction, chunk_lines):
         return ("", False, False) # Trả về chuỗi rỗng, không bị chặn, không bad translation
 
     try:
-        # Prompt cho dịch chunk
-        user_prompt = f"Dịch đoạn văn bản sau sang tiếng Việt một cách trực tiếp, Danh xưng nhân vật dẫn truyện xưng 'tôi' theo bối cảnh hiện đại hoặc 'ta' theo bối cảnh cổ đại,xác định mối quan hệ và danh xưng phù hợp trước tiên, không từ chối hoặc bình luận, giữ nguyên văn phong gốc và chi tiết nội dung:\n\n{full_text_to_translate}"
+        # Tạo prompt khác nhau cho từng bối cảnh
+        if context == "ancient":
+            # Prompt cho bối cảnh cổ đại
+            user_prompt = f"""Dịch đoạn văn bản sau sang tiếng Việt theo phong cách CỔ ĐẠI:
+
+QUY TẮC DANH XƯNG CỔ ĐẠI:
+- NGƯỜI KỂ CHUYỆN (narrator) LUÔN xưng "ta" - KHÔNG BAO GIỜ dùng "tôi", "thần", "hạ thần"
+- KHÔNG dịch người kể chuyện thành "ba", "bố", "con", "anh", "chị"
+- Lời thoại nhân vật trong "..." có thể dùng: ta/ngươi, hạ thần/thần tử, công tử/tiểu thư
+
+PHONG CÁCH CỔ ĐẠI:
+- Ngôn ngữ trang trọng, lịch thiệp
+- Thuật ngữ võ thuật: công pháp, tâm pháp, tu vi, cảnh giới
+- Chức vị: hoàng thượng, hoàng hậu, thái tử, đại thần
+- Từ Hán Việt khi phù hợp
+
+QUAN TRỌNG - OUTPUT:
+- CHỈ trả về nội dung đã dịch
+- KHÔNG thêm giải thích, phân tích, bình luận
+- KHÔNG thêm "Bản dịch:", "Kết quả:", hay bất kỳ tiêu đề nào
+- KHÔNG thêm ghi chú hay chú thích
+
+VĂN BẢN CẦN DỊCH:
+{full_text_to_translate}"""
+        else:
+            # Prompt cho bối cảnh hiện đại
+            user_prompt = f"""Dịch đoạn văn bản sau sang tiếng Việt theo phong cách HIỆN ĐẠI:
+
+QUY TẮC DANH XƯNG HIỆN ĐẠI:
+- NGƯỜI KỂ CHUYỆN (narrator) LUÔN xưng "tôi" - KHÔNG BAO GIỜ dùng "ta", "ba", "bố", "con"
+- KHÔNG dịch người kể chuyện thành danh xưng quan hệ
+- Lời thoại nhân vật trong "..." có thể dùng: anh/chị, em, bạn, ba/mẹ, con
+
+PHONG CÁCH HIỆN ĐẠI:
+- Ngôn ngữ tự nhiên, gần gũi
+- Thuật ngữ công nghệ, đời sống đô thị
+- Giữ từ ngữ thô tục, slang nếu có
+- Không quá trang trọng
+
+QUAN TRỌNG - OUTPUT:
+- CHỈ trả về nội dung đã dịch
+- KHÔNG thêm giải thích, phân tích, bình luận
+- KHÔNG thêm "Bản dịch:", "Kết quả:", hay bất kỳ tiêu đề nào
+- KHÔNG thêm ghi chú hay chú thích
+
+VĂN BẢN CẦN DỊCH:
+{full_text_to_translate}"""
 
         # Chuẩn bị messages cho OpenRouter API
         messages = []
@@ -536,7 +582,7 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, log_callb
         """
         max_retries_for_incomplete = 3  # Tối đa 3 lần retry cho response không hoàn chỉnh
         
-        translated_text, is_safety_blocked, is_bad = translate_chunk(api_key, model_name, system_instruction, lines_to_process)
+        translated_text, is_safety_blocked, is_bad = translate_chunk(api_key, model_name, system_instruction, lines_to_process, "modern")
         
         # Nếu có lỗi safety hoặc quota, return ngay
         if is_safety_blocked or is_quota_exceeded():
