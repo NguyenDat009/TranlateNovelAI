@@ -164,6 +164,12 @@ class ModernTranslateNovelAI(ctk.CTk):
         self.threads_var = ctk.StringVar()
         self.chunk_size_var = ctk.StringVar(value="100")
         
+        # Saved custom models list
+        self.saved_custom_models = []
+        
+        # Model settings storage
+        self.model_settings = {}
+        
         # Auto-detect optimal threads on startup
         self.auto_detect_threads(silent=True)
         
@@ -308,43 +314,40 @@ class ModernTranslateNovelAI(ctk.CTk):
         )
         self.google_key_type_segmented_btn.grid(row=9, column=0, padx=20, pady=5, sticky="ew")
         
-        # Model Selection
+        # --- Model Selection ---
+        self.model_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
+        self.model_frame.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
+        self.model_frame.grid_columnconfigure(0, weight=1)
+        
         self.model_combo = ctk.CTkComboBox(
-            self.sidebar_frame,
-            values=[
-                "anthropic/claude-3.5-sonnet",
-                "anthropic/claude-3-haiku", 
-                "anthropic/claude-3-opus",
-                "openai/gpt-4o",
-                "openai/gpt-4o-mini",
-                "google/gemini-2.0-flash-001",
-                "🔧 Custom Model..."
-            ],
-            variable=self.model_var,
-            command=self.on_model_changed,
-            width=240
+            self.model_frame,
+            values=[], # Will be populated by _update_model_list
+            variable=self.model_var
         )
-        self.model_combo.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
+        self.model_combo.grid(row=0, column=0, sticky="ew")
+
+        # Button frame for + and settings buttons
+        self.model_buttons_frame = ctk.CTkFrame(self.model_frame, fg_color="transparent")
+        self.model_buttons_frame.grid(row=0, column=1, padx=(5, 0))
         
-        # Custom model entry (initially hidden)
-        self.custom_model_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.custom_model_entry = ctk.CTkEntry(
-            self.custom_model_frame,
-            placeholder_text="Nhập model (ví dụ: anthropic/claude-3.5-sonnet)",
-            width=240
-        )
-        self.custom_model_entry.grid(row=0, column=0, sticky="ew")
-        self.custom_model_entry.bind("<Return>", lambda e: self.confirm_custom_model())
-        
-        self.custom_model_confirm_btn = ctk.CTkButton(
-            self.custom_model_frame,
-            text="✅ OK",
-            command=self.confirm_custom_model,
-            width=50,
+        self.add_model_btn = ctk.CTkButton(
+            self.model_buttons_frame,
+            text="➕",
+            command=self.open_add_model_dialog,
+            width=30,
             height=28
         )
-        self.custom_model_confirm_btn.grid(row=0, column=1, padx=(5, 0))
-        self.custom_model_frame.grid_columnconfigure(0, weight=1)
+        self.add_model_btn.grid(row=0, column=0, padx=(0, 2))
+
+        self.model_settings_btn = ctk.CTkButton(
+            self.model_buttons_frame,
+            text="⚙️",
+            command=self.open_model_settings,
+            width=30,
+            height=28
+        )
+        self.model_settings_btn.grid(row=0, column=1)
+        
         
         self.context_combo = ctk.CTkComboBox(
             self.sidebar_frame,
@@ -750,22 +753,6 @@ class ModernTranslateNovelAI(ctk.CTk):
             self.google_ai_paid_key_entry.grid_remove()
             self.google_key_type_segmented_btn.grid_remove()
             
-            # Update model list for OpenRouter
-            self.model_combo.configure(values=[
-                "anthropic/claude-3.5-sonnet",
-                "anthropic/claude-3-haiku",
-                "anthropic/claude-3-opus",
-                "openai/gpt-4o",
-                "openai/gpt-4o-mini",
-                "google/gemini-2.0-flash-001",
-                "google/gemini-1.5-pro",
-                "🔧 Custom Model..."
-            ])
-            # Set default model if current is not compatible
-            current_model = self.model_var.get()
-            if not any(m in current_model for m in ['/', 'custom']):
-                self.model_var.set("anthropic/claude-3.5-sonnet")
-            
             self.log("🔄 Chuyển sang OpenRouter API")
             
         elif choice == "Google AI":
@@ -773,20 +760,6 @@ class ModernTranslateNovelAI(ctk.CTk):
             self.openrouter_key_entry.grid_remove()
             self.google_key_type_segmented_btn.grid()
             self.on_google_key_type_changed() # Show correct entry based on selector's current value
-            
-            # Update model list for Google AI
-            self.model_combo.configure(values=[
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
-                "gemini-2.0-flash",
-                "gemini-2.0-flash-lite",
-                "gemini-1.5-pro",
-                "gemini-1.5-flash",
-                "🔧 Custom Model..."
-            ])
-            # Set default model for Google AI
-            self.model_var.set("gemini-2.5-flash")
             
             self.log("🔄 Chuyển sang Google AI API")
             
@@ -800,37 +773,43 @@ class ModernTranslateNovelAI(ctk.CTk):
             self.log("   • Luôn kiểm tra giới hạn RPM mới nhất tại trang chủ Google AI.")
             self.log("   • Tham khảo: https://ai.google.dev/gemini-api/docs/rate-limits")
     
-    def on_model_changed(self, choice):
-        """Xử lý khi thay đổi model"""
-        if choice == "🔧 Custom Model...":
-            self.custom_model_frame.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
-            self.custom_model_entry.focus()
+        # Update model list for the new provider
+        self._update_model_list()
+
+    def _update_model_list(self):
+        """Cập nhật danh sách model trong combobox dựa trên provider và các model đã lưu."""
+        provider = self.api_provider_var.get()
+        
+        if provider == "OpenRouter":
+            base_models = [
+
+                "openai/gpt-4o-mini"
+                "google/gemini-2.0-flash-001",
+                "google/gemini-1.5-pro"
+            ]
+        elif provider == "Google AI":
+            base_models = [
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-lite",
+                "gemini-1.5-pro",
+                "gemini-1.5-flash"
+            ]
         else:
-            self.custom_model_frame.grid_remove()
+            base_models = []
+
+        # Combine base models with saved custom models
+        combined_models = base_models + sorted(self.saved_custom_models)
+        
+        self.model_combo.configure(values=combined_models)
+        
+        # Check if the current model is still valid, if not, set a default
+        current_model = self.model_var.get()
+        if current_model not in combined_models:
+            self.model_var.set(base_models[0] if base_models else "anthropic/claude-3.5-sonnet")
     
-    def confirm_custom_model(self):
-        """Xác nhận custom model"""
-        custom_model = self.custom_model_entry.get().strip()
-        if not custom_model:
-            show_error("Vui lòng nhập tên model!", parent=self)
-            return
-        
-        # Validate model format
-        if '/' not in custom_model:
-            result = show_question(
-                f"Model '{custom_model}' không có format chuẩn 'provider/model-name'.\n\n"
-                f"Ví dụ format đúng: anthropic/claude-3.5-sonnet\n\n"
-                f"Bạn có muốn tiếp tục với model này không?",
-                parent=self
-            )
-            if not result:
-                return
-        
-        # Set the custom model
-        self.model_var.set(custom_model)
-        self.custom_model_frame.grid_remove()
-        self.log(f"🔧 Đã đặt custom model: {custom_model}")
-        show_success(f"Đã đặt custom model:\n{custom_model}", parent=self)
     
     def on_google_key_type_changed(self, choice=None):
         """Xử lý khi thay đổi loại key Google AI (Free/Paid)"""
@@ -965,6 +944,7 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
                     hover_color=("darkblue", "blue")
                 )
                 self.progress_text.configure(text="Sẵn sàng để bắt đầu...")
+                self.progress_bar.set(0)  # Reset progress bar
     
     def browse_output_file(self):
         """Chọn file output"""
@@ -1366,27 +1346,38 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             )
             self.progress_text.configure(text="API hết quota - cần API key mới")
         else:
-            # Dịch hoàn thành hoặc bị dừng bình thường
-            self.translate_btn.configure(
-                state="normal", 
-                text="🚀 Bắt Đầu Dịch",
-                fg_color=("blue", "darkblue"),
-                hover_color=("darkblue", "blue")
-            )
+            # Kiểm tra xem có file progress không để xác định trạng thái
+            progress_file_path = f"{self.input_file_var.get()}.progress.json"
             
-            # Kiểm tra trạng thái progress text hiện tại
-            current_progress = self.progress_text.cget("text")
-            if not current_progress.startswith("Hoàn thành"):
-                # Check if stopped or failed
-                if is_translation_stopped():
-                    self.progress_text.configure(text="Đã dừng - có thể tiếp tục")
-                    self.translate_btn.configure(
-                        text="▶️ Tiếp Tục Dịch",
-                        fg_color=("blue", "darkblue"),
-                        hover_color=("darkblue", "blue")
-                    )
-                else:
-                    self.progress_text.configure(text="Sẵn sàng")
+            if is_translation_stopped():
+                # Dịch bị dừng
+                self.translate_btn.configure(
+                    state="normal", 
+                    text="▶️ Tiếp Tục Dịch",
+                    fg_color=("blue", "darkblue"),
+                    hover_color=("darkblue", "blue")
+                )
+                self.progress_text.configure(text="Đã dừng - có thể tiếp tục")
+            elif not os.path.exists(progress_file_path):
+                # Không có file progress = dịch hoàn thành
+                self.translate_btn.configure(
+                    state="normal", 
+                    text="🚀 Bắt Đầu Dịch",
+                    fg_color=("blue", "darkblue"),
+                    hover_color=("darkblue", "blue")
+                )
+                self.progress_text.configure(text="✅ Dịch hoàn thành!")
+                self.progress_bar.set(1.0)  # Set progress bar to 100%
+                self.log("🎉 Dịch hoàn thành thành công!")
+            else:
+                # Có file progress = dịch chưa hoàn thành
+                self.translate_btn.configure(
+                    state="normal", 
+                    text="▶️ Tiếp Tục Dịch",
+                    fg_color=("blue", "darkblue"),
+                    hover_color=("darkblue", "blue")
+                )
+                self.progress_text.configure(text="Đã dừng - có thể tiếp tục")
         
         # Clear translation thread reference
         if hasattr(self, 'translation_thread'):
@@ -1452,7 +1443,8 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             "google_ai_key": self.google_ai_key_var.get() if hasattr(self, 'google_ai_key_var') else "",  # Deprecated, giữ lại để tương thích
             "api_key": self.api_key_var.get(),  # Deprecated, giữ lại để tương thích
             "model": self.model_var.get(),
-            "custom_model": self.custom_model_entry.get() if hasattr(self, 'custom_model_entry') else "",
+            "saved_custom_models": self.saved_custom_models, # Save the list of custom models
+            "model_settings": self.model_settings, # Save model settings
             "context": self.context_var.get(),
             "custom_prompt": custom_prompt,
             "auto_reformat": self.auto_reformat_var.get(),
@@ -1508,9 +1500,11 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
                 self.api_key_var.set(settings.get("api_key", ""))  # Deprecated
                 self.model_var.set(settings.get("model", "anthropic/claude-3.5-sonnet"))
                 
-                # Load custom model if exists
-                if hasattr(self, 'custom_model_entry') and settings.get("custom_model"):
-                    self.custom_model_entry.insert(0, settings.get("custom_model"))
+                # Load saved custom models
+                self.saved_custom_models = settings.get("saved_custom_models", [])
+                
+                # Load model settings
+                self.model_settings = settings.get("model_settings", {})
                 
                 self.context_var.set(settings.get("context", "Bối cảnh hiện đại"))
                 self.auto_reformat_var.set(settings.get("auto_reformat", True))
@@ -1661,14 +1655,9 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
         return self.api_provider_var.get()
     
     def get_current_model(self):
-        """Lấy model hiện tại (có thể là custom model)"""
+        """Lấy model hiện tại"""
         current_model = self.model_var.get()
-        if current_model == "🔧 Custom Model...":
-            # If custom model is selected but not confirmed yet, return the entry value
-            if hasattr(self, 'custom_model_entry'):
-                custom_model = self.custom_model_entry.get().strip()
-                if custom_model:
-                    return custom_model
+        if not current_model:
             # Fallback to default based on provider
             provider = self.get_current_provider()
             if provider == "Google AI":
@@ -1732,6 +1721,15 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             
             # Post-translation actions
             if success and not is_translation_stopped():
+                # Xóa file progress khi hoàn thành
+                progress_file_path = f"{input_file}.progress.json"
+                if os.path.exists(progress_file_path):
+                    try:
+                        os.remove(progress_file_path)
+                        self.log(f"🗑️ Đã xóa file tiến độ khi hoàn thành.")
+                    except Exception as e:
+                        self.log(f"⚠️ Không thể xóa file tiến độ: {e}")
+
                 # Auto reformat
                 if self.auto_reformat_var.get():
                     self.log("🔧 Bắt đầu reformat file đã dịch...")
@@ -1807,7 +1805,7 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
             show_error(f"Vui lòng nhập API key cho {provider_name}.", parent=self)
             self.test_api_btn.configure(state="normal", text="🧪 Test API")
             return
-
+f
         threading.Thread(target=self._run_api_test, args=(api_key_to_test, model, provider), daemon=True).start()
 
     def _run_api_test(self, api_key, model, provider):
@@ -1864,6 +1862,553 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
                 )
         except Exception as e:
             print(f"⚠️ Lỗi cập nhật appearance buttons: {e}")
+
+    def open_add_model_dialog(self):
+        """Mở dialog để thêm model mới."""
+        
+        # Tạo cửa sổ Toplevel
+        if hasattr(self, 'add_model_window') and self.add_model_window.winfo_exists():
+            self.add_model_window.focus()
+            return
+        
+        self.add_model_window = ctk.CTkToplevel(self)
+        self.add_model_window.title("Thêm Model Mới")
+        self.add_model_window.geometry("450x300")
+        self.add_model_window.transient(self)
+        self.add_model_window.grab_set()
+        
+        self.add_model_window.grid_columnconfigure(0, weight=1)
+
+        # --- Title ---
+        title_label = ctk.CTkLabel(self.add_model_window, text="Thêm Model Mới", font=ctk.CTkFont(size=18, weight="bold"))
+        title_label.grid(row=0, column=0, padx=20, pady=(20, 10))
+
+        # --- Model Name Entry ---
+        model_name_label = ctk.CTkLabel(self.add_model_window, text="Tên Model:", font=ctk.CTkFont(size=12, weight="bold"))
+        model_name_label.grid(row=1, column=0, padx=20, pady=(10, 5), sticky="w")
+        
+        self.add_model_entry = ctk.CTkEntry(
+            self.add_model_window,
+            placeholder_text="Ví dụ: anthropic/claude-3.5-sonnet",
+            width=400
+        )
+        self.add_model_entry.grid(row=2, column=0, padx=20, pady=5, sticky="ew")
+        self.add_model_entry.focus()
+
+        # --- Examples ---
+        examples_label = ctk.CTkLabel(
+            self.add_model_window, 
+            text="Ví dụ các model phổ biến:",
+            font=ctk.CTkFont(size=11, weight="bold")
+        )
+        examples_label.grid(row=3, column=0, padx=20, pady=(15, 5), sticky="w")
+        
+        examples_text = """• OpenRouter: anthropic/claude-3.5-sonnet, openai/gpt-4o
+• Google AI: gemini-2.0-flash-exp, gemini-1.5-pro-002
+• Anthropic: claude-3-opus-20240229
+• OpenAI: gpt-4-turbo-preview"""
+        
+        examples_display = ctk.CTkLabel(
+            self.add_model_window,
+            text=examples_text,
+            font=ctk.CTkFont(size=10),
+            justify="left"
+        )
+        examples_display.grid(row=4, column=0, padx=20, pady=5, sticky="w")
+
+        # --- Buttons ---
+        button_frame = ctk.CTkFrame(self.add_model_window, fg_color="transparent")
+        button_frame.grid(row=5, column=0, padx=20, pady=(20, 20), sticky="ew")
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+
+        cancel_btn = ctk.CTkButton(
+            button_frame,
+            text="Hủy",
+            command=self.add_model_window.destroy,
+            fg_color="gray",
+            hover_color="darkgray"
+        )
+        cancel_btn.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+
+        add_btn = ctk.CTkButton(
+            button_frame,
+            text="Thêm Model",
+            command=self._confirm_add_model
+        )
+        add_btn.grid(row=0, column=1, padx=(10, 0), sticky="ew")
+        
+        # Bind Enter key to add model
+        self.add_model_entry.bind("<Return>", lambda e: self._confirm_add_model())
+
+    def _confirm_add_model(self):
+        """Xác nhận thêm model mới."""
+        model_name = self.add_model_entry.get().strip()
+        
+        if not model_name:
+            show_error("Vui lòng nhập tên model!", parent=self.add_model_window)
+            return
+        
+        # Validate model format for OpenRouter
+        provider = self.get_current_provider()
+        if provider == "OpenRouter" and '/' not in model_name:
+            result = show_question(
+                f"Model '{model_name}' không có format chuẩn 'provider/model-name'.\n\n"
+                f"Ví dụ format đúng: anthropic/claude-3.5-sonnet\n\n"
+                f"Bạn có muốn tiếp tục với model này không?",
+                parent=self.add_model_window
+            )
+            if not result:
+                return
+        
+        # Check if model already exists
+        if model_name in self.saved_custom_models:
+            show_warning(f"Model '{model_name}' đã tồn tại!", parent=self.add_model_window)
+            return
+        
+        # Add to saved models list
+        self.saved_custom_models.append(model_name)
+        self.saved_custom_models.sort()
+        
+        # Initialize default settings for the model
+        self.model_settings[model_name] = self._get_default_model_settings()
+        
+        # Update model list and select the new model
+        self._update_model_list()
+        self.model_var.set(model_name)
+        
+        # Close dialog
+        self.add_model_window.destroy()
+        
+        # Log and show success
+        self.log(f"➕ Đã thêm model mới: {model_name}")
+        show_success(f"Đã thêm model mới:\n{model_name}", parent=self)
+
+    def _get_default_model_settings(self):
+        """Lấy cài đặt mặc định cho model mới."""
+        return {
+            "thinking_mode": False,
+            "top_p": 1.0,
+            "temperature": 1.0,
+            "max_tokens": 4096,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
+            "repetition_penalty": 1.0,
+            "top_k": 0,
+            "min_p": 0.0
+        }
+
+    def open_model_settings(self):
+        """Mở dialog cài đặt model."""
+        current_model = self.get_current_model()
+        
+        if not current_model:
+            show_error("Vui lòng chọn model trước!", parent=self)
+            return
+        
+        # Tạo cửa sổ Toplevel
+        if hasattr(self, 'model_settings_window') and self.model_settings_window.winfo_exists():
+            self.model_settings_window.focus()
+            return
+        
+        self.model_settings_window = ctk.CTkToplevel(self)
+        self.model_settings_window.title(f"Cài Đặt Model: {current_model}")
+        self.model_settings_window.geometry("500x600")
+        self.model_settings_window.transient(self)
+        self.model_settings_window.grab_set()
+        
+        self.model_settings_window.grid_columnconfigure(0, weight=1)
+        self.model_settings_window.grid_rowconfigure(1, weight=1)
+
+        # --- Title ---
+        title_label = ctk.CTkLabel(
+            self.model_settings_window, 
+            text=f"Cài Đặt Model: {current_model}", 
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        title_label.grid(row=0, column=0, padx=20, pady=(20, 10))
+
+        # --- Scrollable Frame ---
+        settings_frame = ctk.CTkScrollableFrame(self.model_settings_window)
+        settings_frame.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        settings_frame.grid_columnconfigure(1, weight=1)
+
+        # Get current settings or defaults
+        current_settings = self.model_settings.get(current_model, self._get_default_model_settings())
+        
+        # Store references to entry widgets
+        self.settings_widgets = {}
+        
+        row = 0
+        
+        # Thinking Mode (checkbox)
+        thinking_label = ctk.CTkLabel(settings_frame, text="Thinking Mode:", font=ctk.CTkFont(weight="bold"))
+        thinking_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["thinking_mode"] = ctk.CTkCheckBox(
+            settings_frame,
+            text="Bật chế độ suy nghĩ (o1 models)",
+            variable=ctk.BooleanVar(value=current_settings.get("thinking_mode", False))
+        )
+        self.settings_widgets["thinking_mode"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Temperature
+        temp_label = ctk.CTkLabel(settings_frame, text="Temperature:", font=ctk.CTkFont(weight="bold"))
+        temp_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["temperature"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="0.0 - 2.0",
+            width=200
+        )
+        self.settings_widgets["temperature"].insert(0, str(current_settings.get("temperature", 1.0)))
+        self.settings_widgets["temperature"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Top P
+        top_p_label = ctk.CTkLabel(settings_frame, text="Top P:", font=ctk.CTkFont(weight="bold"))
+        top_p_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["top_p"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="0.0 - 1.0",
+            width=200
+        )
+        self.settings_widgets["top_p"].insert(0, str(current_settings.get("top_p", 1.0)))
+        self.settings_widgets["top_p"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Max Tokens
+        max_tokens_label = ctk.CTkLabel(settings_frame, text="Max Tokens:", font=ctk.CTkFont(weight="bold"))
+        max_tokens_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["max_tokens"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="1 - 32768",
+            width=200
+        )
+        self.settings_widgets["max_tokens"].insert(0, str(current_settings.get("max_tokens", 4096)))
+        self.settings_widgets["max_tokens"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Frequency Penalty
+        freq_penalty_label = ctk.CTkLabel(settings_frame, text="Frequency Penalty:", font=ctk.CTkFont(weight="bold"))
+        freq_penalty_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["frequency_penalty"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="-2.0 - 2.0",
+            width=200
+        )
+        self.settings_widgets["frequency_penalty"].insert(0, str(current_settings.get("frequency_penalty", 0.0)))
+        self.settings_widgets["frequency_penalty"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Presence Penalty
+        pres_penalty_label = ctk.CTkLabel(settings_frame, text="Presence Penalty:", font=ctk.CTkFont(weight="bold"))
+        pres_penalty_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["presence_penalty"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="-2.0 - 2.0",
+            width=200
+        )
+        self.settings_widgets["presence_penalty"].insert(0, str(current_settings.get("presence_penalty", 0.0)))
+        self.settings_widgets["presence_penalty"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Repetition Penalty
+        rep_penalty_label = ctk.CTkLabel(settings_frame, text="Repetition Penalty:", font=ctk.CTkFont(weight="bold"))
+        rep_penalty_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["repetition_penalty"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="0.0 - 2.0",
+            width=200
+        )
+        self.settings_widgets["repetition_penalty"].insert(0, str(current_settings.get("repetition_penalty", 1.0)))
+        self.settings_widgets["repetition_penalty"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Top K
+        top_k_label = ctk.CTkLabel(settings_frame, text="Top K:", font=ctk.CTkFont(weight="bold"))
+        top_k_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["top_k"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="0 - 100",
+            width=200
+        )
+        self.settings_widgets["top_k"].insert(0, str(current_settings.get("top_k", 0)))
+        self.settings_widgets["top_k"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # Min P
+        min_p_label = ctk.CTkLabel(settings_frame, text="Min P:", font=ctk.CTkFont(weight="bold"))
+        min_p_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        self.settings_widgets["min_p"] = ctk.CTkEntry(
+            settings_frame,
+            placeholder_text="0.0 - 1.0",
+            width=200
+        )
+        self.settings_widgets["min_p"].insert(0, str(current_settings.get("min_p", 0.0)))
+        self.settings_widgets["min_p"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+
+        # --- Buttons ---
+        button_frame = ctk.CTkFrame(self.model_settings_window, fg_color="transparent")
+        button_frame.grid(row=2, column=0, padx=20, pady=(10, 20), sticky="ew")
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+        button_frame.grid_columnconfigure(2, weight=1)
+
+        reset_btn = ctk.CTkButton(
+            button_frame,
+            text="Reset",
+            command=lambda: self._reset_model_settings(current_model),
+            fg_color="orange",
+            hover_color="darkorange"
+        )
+        reset_btn.grid(row=0, column=0, padx=(0, 5), sticky="ew")
+
+        cancel_btn = ctk.CTkButton(
+            button_frame,
+            text="Hủy",
+            command=self.model_settings_window.destroy,
+            fg_color="gray",
+            hover_color="darkgray"
+        )
+        cancel_btn.grid(row=0, column=1, padx=5, sticky="ew")
+
+        save_btn = ctk.CTkButton(
+            button_frame,
+            text="Lưu",
+            command=lambda: self._save_model_settings(current_model)
+        )
+        save_btn.grid(row=0, column=2, padx=(5, 0), sticky="ew")
+
+    def _reset_model_settings(self, model_name):
+        """Reset cài đặt model về mặc định."""
+        default_settings = self._get_default_model_settings()
+        
+        # Update widgets
+        self.settings_widgets["thinking_mode"].deselect() if not default_settings["thinking_mode"] else self.settings_widgets["thinking_mode"].select()
+        
+        for key, widget in self.settings_widgets.items():
+            if key != "thinking_mode":  # Skip checkbox
+                widget.delete(0, "end")
+                widget.insert(0, str(default_settings[key]))
+        
+        self.log(f"🔄 Đã reset cài đặt model {model_name} về mặc định")
+
+    def _save_model_settings(self, model_name):
+        """Lưu cài đặt model."""
+        try:
+            settings = {}
+            
+            # Get thinking mode
+            settings["thinking_mode"] = self.settings_widgets["thinking_mode"].get()
+            
+            # Get numeric values
+            numeric_fields = ["temperature", "top_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p"]
+            integer_fields = ["max_tokens", "top_k"]
+            
+            for field in numeric_fields:
+                try:
+                    value = float(self.settings_widgets[field].get())
+                    settings[field] = value
+                except ValueError:
+                    show_error(f"Giá trị '{field}' không hợp lệ!", parent=self.model_settings_window)
+                    return
+            
+            for field in integer_fields:
+                try:
+                    value = int(self.settings_widgets[field].get())
+                    settings[field] = value
+                except ValueError:
+                    show_error(f"Giá trị '{field}' phải là số nguyên!", parent=self.model_settings_window)
+                    return
+            
+            # Validate ranges
+            if not (0.0 <= settings["temperature"] <= 2.0):
+                show_error("Temperature phải từ 0.0 đến 2.0!", parent=self.model_settings_window)
+                return
+            
+            if not (0.0 <= settings["top_p"] <= 1.0):
+                show_error("Top P phải từ 0.0 đến 1.0!", parent=self.model_settings_window)
+                return
+            
+            if not (1 <= settings["max_tokens"] <= 32768):
+                show_error("Max Tokens phải từ 1 đến 32768!", parent=self.model_settings_window)
+                return
+            
+            # Save settings
+            self.model_settings[model_name] = settings
+            
+            # Close dialog
+            self.model_settings_window.destroy()
+            
+            # Log and show success
+            self.log(f"💾 Đã lưu cài đặt cho model: {model_name}")
+            show_success(f"Đã lưu cài đặt cho model:\n{model_name}", parent=self)
+            
+        except Exception as e:
+            show_error(f"Lỗi lưu cài đặt: {e}", parent=self.model_settings_window)
+
+    def open_model_manager(self):
+        """Mở dialog quản lý custom model."""
+        
+        # Tạo cửa sổ Toplevel
+        if hasattr(self, 'model_manager_window') and self.model_manager_window.winfo_exists():
+            self.model_manager_window.focus()
+            return
+        
+        self.model_manager_window = ctk.CTkToplevel(self)
+        self.model_manager_window.title("Quản lý Model Tùy Chỉnh")
+        self.model_manager_window.geometry("600x500")
+        self.model_manager_window.transient(self)
+        self.model_manager_window.grab_set()
+        
+        self.model_manager_window.grid_columnconfigure(0, weight=1)
+        self.model_manager_window.grid_rowconfigure(1, weight=1)
+
+        # --- Label ---
+        label = ctk.CTkLabel(self.model_manager_window, text="Danh sách Model Đã Lưu", font=ctk.CTkFont(size=16, weight="bold"))
+        label.grid(row=0, column=0, padx=20, pady=(20, 10))
+
+        # --- Scrollable Frame for models ---
+        self.model_list_frame = ctk.CTkScrollableFrame(self.model_manager_window)
+        self.model_list_frame.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        self.model_list_frame.grid_columnconfigure(0, weight=1)
+
+        # --- Populate models ---
+        self._populate_model_manager()
+
+        # --- Close button ---
+        close_button = ctk.CTkButton(self.model_manager_window, text="Đóng", command=self.model_manager_window.destroy)
+        close_button.grid(row=2, column=0, padx=20, pady=(10, 20))
+
+    def _populate_model_manager(self):
+        """Xóa và điền lại danh sách model trong cửa sổ quản lý."""
+        # Clear existing widgets
+        for widget in self.model_list_frame.winfo_children():
+            widget.destroy()
+
+        if not self.saved_custom_models:
+            no_models_label = ctk.CTkLabel(self.model_list_frame, text="Chưa có model tùy chỉnh nào được lưu.")
+            no_models_label.pack(pady=20)
+            return
+
+        # Add models to the list
+        for i, model_name in enumerate(sorted(self.saved_custom_models)):
+            row_frame = ctk.CTkFrame(self.model_list_frame, fg_color="transparent")
+            row_frame.grid(row=i, column=0, pady=(5, 0), sticky="ew")
+            row_frame.grid_columnconfigure(0, weight=1)
+
+            model_label = ctk.CTkLabel(row_frame, text=model_name, anchor="w", font=ctk.CTkFont(weight="bold"))
+            model_label.grid(row=0, column=0, padx=10, sticky="w")
+            
+            # Show settings info
+            settings = self.model_settings.get(model_name, {})
+            settings_info = f"T:{settings.get('temperature', 1.0)} | P:{settings.get('top_p', 1.0)} | Max:{settings.get('max_tokens', 4096)}"
+            if settings.get('thinking_mode', False):
+                settings_info = "🧠 " + settings_info
+            
+            settings_label = ctk.CTkLabel(row_frame, text=settings_info, anchor="w", font=ctk.CTkFont(size=10), text_color="gray")
+            settings_label.grid(row=1, column=0, padx=10, sticky="w")
+            
+            # Button frame
+            btn_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
+            btn_frame.grid(row=0, column=1, rowspan=2, padx=10)
+            
+            settings_btn = ctk.CTkButton(
+                btn_frame,
+                text="⚙️",
+                command=lambda m=model_name: self._edit_model_settings(m),
+                width=30,
+                height=25,
+                fg_color="transparent",
+                border_color=("gray70", "gray30"),
+                border_width=1,
+                hover_color=("blue", "#0066cc")
+            )
+            settings_btn.grid(row=0, column=0, padx=(0, 5))
+            
+            delete_btn = ctk.CTkButton(
+                btn_frame,
+                text="🗑️",
+                command=lambda m=model_name: self._delete_custom_model(m),
+                width=30,
+                height=25,
+                fg_color="transparent",
+                border_color=("gray70", "gray30"),
+                border_width=1,
+                hover_color=("red", "#990000")
+            )
+            delete_btn.grid(row=0, column=1)
+
+    def _edit_model_settings(self, model_name):
+        """Mở dialog chỉnh sửa settings cho model cụ thể."""
+        # Temporarily set the model to edit its settings
+        original_model = self.model_var.get()
+        self.model_var.set(model_name)
+        
+        # Close model manager window
+        if hasattr(self, 'model_manager_window'):
+            self.model_manager_window.destroy()
+        
+        # Open model settings
+        self.open_model_settings()
+        
+        # Restore original model selection after settings dialog closes
+        def restore_model():
+            if hasattr(self, 'model_settings_window') and self.model_settings_window.winfo_exists():
+                self.after(100, restore_model)
+            else:
+                self.model_var.set(original_model)
+                # Reopen model manager
+                self.after(100, self.open_model_manager)
+        
+        restore_model()
+
+    def _delete_custom_model(self, model_to_delete):
+        """Xóa một model tùy chỉnh khỏi danh sách đã lưu."""
+        result = show_question(
+            f"Bạn có chắc muốn xóa model '{model_to_delete}' không?\n\nCài đặt của model này cũng sẽ bị xóa.",
+            parent=self.model_manager_window
+        )
+        
+        if not result:
+            return
+            
+        if model_to_delete in self.saved_custom_models:
+            self.saved_custom_models.remove(model_to_delete)
+            
+            # Remove model settings
+            if model_to_delete in self.model_settings:
+                del self.model_settings[model_to_delete]
+            
+            # Nếu model đang được chọn bị xóa, reset về model mặc định
+            if self.model_var.get() == model_to_delete:
+                self.model_var.set(self._get_default_model())
+                
+            self._update_model_list() # Cập nhật combobox chính
+            self._populate_model_manager() # Cập nhật cửa sổ quản lý
+            
+            self.log(f"🗑️ Đã xóa model tùy chỉnh: {model_to_delete}")
+            show_toast_success(f"Đã xóa model: {model_to_delete}")
+        else:
+            show_toast_error(f"Không tìm thấy model: {model_to_delete}")
+
+    def _get_default_model(self):
+        """Lấy model mặc định dựa trên provider hiện tại."""
+        provider = self.api_provider_var.get()
+        if provider == "Google AI":
+            return "gemini-2.5-flash"
+        else: # OpenRouter
+            return "anthropic/claude-3.5-sonnet"
 
 if __name__ == "__main__":
     app = ModernTranslateNovelAI()
