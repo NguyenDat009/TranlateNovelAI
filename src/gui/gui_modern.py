@@ -1300,10 +1300,32 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
         self.log(f"📁 Output: {os.path.basename(output_file)}")
         self.log(f"🔑 Provider: {provider}")
         
-        # Log số lượng keys cho Google AI
+        # Log số lượng keys cho Google AI với recommendations
         if provider == "Google AI" and isinstance(api_key, list):
-            self.log(f"🔑 Số lượng API keys: {len(api_key)} keys")
-            self.log(f"💡 Tổng RPM ước tính: ~{len(api_key) * 10} RPM (mỗi key ~10 RPM)")
+            num_keys = len(api_key)
+            self.log(f"🔑 Số lượng API keys: {num_keys} keys")
+            
+            base_rpm = 10  # Default RPM per key
+            if "pro" in current_model.lower():
+                base_rpm = 2
+            
+            total_rpm = num_keys * base_rpm
+            self.log(f"💡 Tổng RPM ước tính: ~{total_rpm} RPM (mỗi key ~{base_rpm} RPM)")
+            
+            # NEW: Recommendation cho > 5 keys
+            if num_keys > 5:
+                recommended_threads_min = num_keys * 2
+                recommended_threads_max = num_keys * 3
+                
+                self.log(f"✨ Với {num_keys} keys, khuyến nghị:")
+                self.log(f"   📌 Threads: {recommended_threads_min}-{recommended_threads_max} (hiện tại: {num_threads})")
+                
+                if num_threads < recommended_threads_min:
+                    self.log(f"   ⚠️ Threads hiện tại thấp, có thể tăng lên để tăng tốc độ!")
+                elif num_threads > recommended_threads_max:
+                    self.log(f"   ⚠️ Threads hiện tại cao, có thể gặp rate limit!")
+                else:
+                    self.log(f"   ✅ Threads trong khoảng tối ưu!")
         
         self.log(f"🤖 Model: {current_model}")
         self.log(f"⚡ Threads: {num_threads}")
@@ -1409,6 +1431,18 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
                 self.progress_text.configure(text="✅ Dịch hoàn thành!")
                 self.progress_bar.set(1.0)  # Set progress bar to 100%
                 self.log("🎉 Dịch hoàn thành thành công!")
+                
+                # Tự động convert EPUB nếu user chọn
+                if self.auto_convert_epub_var.get():
+                    self.log("\n📚 Bắt đầu convert sang EPUB...")
+                    output_file = self.output_file_var.get()
+                    if output_file and os.path.exists(output_file):
+                        try:
+                            self.convert_to_epub(output_file)
+                        except Exception as e:
+                            self.log(f"❌ Lỗi khi convert EPUB: {e}")
+                    else:
+                        self.log("⚠️ Không tìm thấy file output để convert EPUB")
             else:
                 # Có file progress = dịch chưa hoàn thành
                 self.translate_btn.configure(

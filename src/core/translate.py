@@ -761,6 +761,14 @@ def translate_chunk(model, chunk_lines, system_instruction, context="modern"):
                 if rating.blocked
             ]
             return (f"[NỘI DỊCH BỊ CHẶN BỞI BỘ LỌC AN TOÀN - OUTPUT: {', '.join(blocked_categories)}]", True, False)
+        
+        # 4. Kiểm tra nếu response bị cắt do vượt quá max_tokens
+        finish_reason_name = str(first_candidate.finish_reason)
+        if 'MAX_TOKENS' in finish_reason_name or finish_reason_name == 'LENGTH':
+            print(f"⚠️ Cảnh báo Google AI: Response bị cắt (finish_reason={finish_reason_name})")
+            translated_text = response.text
+            # Đánh dấu là bad translation để trigger re-chunk logic
+            return (translated_text + " [BỊ CẮT - CẦN CHUNK NHỎ HƠN]", False, True)
 
         # Nếu không bị chặn, trả về văn bản dịch
         translated_text = response.text
@@ -849,6 +857,213 @@ def split_large_chunk(chunk_lines, max_lines=50):
     
     return sub_chunks
 
+def translate_sub_chunk_recursive(model, sub_chunk, system_instruction, context, chunk_index, sub_index, 
+                                   level=1, max_level=3, use_google_ai=True, use_openrouter=False, 
+                                   api_key=None, model_name=None, openrouter_translate_chunk=None, 
+                                   key_rotator=None, tried_keys=None):
+    """
+    Dịch sub-chunk với khả năng chia nhỏ recursive đến 3 cấp độ.
+    Nếu chia 3 levels vẫn thất bại, thử retry với API key khác (Google AI only).
+    
+    Args:
+        level: Cấp độ hiện tại (1, 2, hoặc 3)
+        max_level: Cấp độ tối đa (default 3)
+        key_rotator: KeyRotator object để lấy key khác khi cần retry
+        tried_keys: Set các keys đã thử để tránh retry lặp lại
+        
+    Returns:
+        (translated_text, success_flag)
+    """
+    level_prefix = "   " * level  # Indent theo level
+    
+    # Initialize tried_keys tracking
+    if tried_keys is None:
+        tried_keys = set()
+    
+    if level > max_level:
+        print(f"{level_prefix}⚠️ Đã đạt cấp độ tối đa ({max_level}), lưu kết quả hiện tại")
+        return (f"[CẤP ĐỘ TỐI ĐA - KHÔNG THỂ CHIA NHỎ HƠN]", False)
+    
+    # Kiểm tra chunk quá nhỏ
+    min_lines_per_level = [10, 5, 3]  # Level 1: 10, Level 2: 5, Level 3: 3
+    min_lines = min_lines_per_level[min(level - 1, len(min_lines_per_level) - 1)]
+    
+    if len(sub_chunk) < min_lines:
+        print(f"{level_prefix}⚠️ Sub-chunk quá nhỏ ({len(sub_chunk)} dòng), không thể chia thêm")
+        return (f"[QUÁ NHỎ - {len(sub_chunk)} DÒNG]", False)
+    
+    try:
+        print(f"{level_prefix}🔄 Level {level} - Đang dịch sub-chunk {sub_index} ({len(sub_chunk)} dòng)...")
+        
+        # Thử dịch sub-chunk
+        if use_google_ai:
+            translated_sub, safety_sub, is_bad_sub = translate_chunk(model, sub_chunk, system_instruction, context)
+        elif use_openrouter:
+            translated_sub, safety_sub, is_bad_sub = openrouter_translate_chunk(api_key, model_name, system_instruction, sub_chunk, context)
+        else:
+            return (f"[PROVIDER ERROR]", False)
+        
+        # Xử lý các trường hợp response
+        if safety_sub:
+            print(f"{level_prefix}⚠️ Level {level} - Bị safety block, vẫn lưu kết quả")
+            return (translated_sub + f" [SAFETY-L{level}]", True)  # True vì vẫn có kết quả
+        
+        # Kiểm tra nếu bị cắt
+        if "[BỊ CẮT - CẦN CHUNK NHỎ HƠN]" in translated_sub:
+            print(f"{level_prefix}🔄 Level {level} - Bị cắt, chia nhỏ xuống level {level + 1}...")
+            return split_and_translate_recursive(model, sub_chunk, system_instruction, context, 
+                                                chunk_index, sub_index, level + 1, max_level,
+                                                use_google_ai, use_openrouter, api_key, model_name, 
+                                                openrouter_translate_chunk, key_rotator, tried_keys)
+        
+        if not is_bad_sub:
+            print(f"{level_prefix}✅ Level {level} - Sub-chunk {sub_index} thành công")
+            return (translated_sub, True)
+        else:
+            # Bad translation - retry 1 lần rồi chia nhỏ
+            print(f"{level_prefix}⚠️ Level {level} - Bad translation, retry 1 lần...")
+            time.sleep(1)
+            
+            if use_google_ai:
+                translated_retry, safety_retry, is_bad_retry = translate_chunk(model, sub_chunk, system_instruction, context)
+            elif use_openrouter:
+                translated_retry, safety_retry, is_bad_retry = openrouter_translate_chunk(api_key, model_name, system_instruction, sub_chunk, context)
+            
+            if not is_bad_retry and not safety_retry:
+                print(f"{level_prefix}✅ Level {level} - Retry thành công")
+                return (translated_retry, True)
+            else:
+                # Vẫn bad sau retry - chia nhỏ
+                print(f"{level_prefix}🔄 Level {level} - Vẫn bad sau retry, chia nhỏ xuống level {level + 1}...")
+                return split_and_translate_recursive(model, sub_chunk, system_instruction, context,
+                                                    chunk_index, sub_index, level + 1, max_level,
+                                                    use_google_ai, use_openrouter, api_key, model_name,
+                                                    openrouter_translate_chunk, key_rotator, tried_keys)
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"{level_prefix}❌ Level {level} - Lỗi: {error_msg[:100]}")
+        
+        # Kiểm tra các lỗi có thể chia nhỏ
+        if ("context" in error_msg.lower() and "length" in error_msg.lower()) or \
+           ("too long" in error_msg.lower()) or \
+           ("maximum" in error_msg.lower()):
+            print(f"{level_prefix}🔄 Level {level} - Context/length error, chia nhỏ xuống level {level + 1}...")
+            return split_and_translate_recursive(model, sub_chunk, system_instruction, context,
+                                                chunk_index, sub_index, level + 1, max_level,
+                                                use_google_ai, use_openrouter, api_key, model_name,
+                                                openrouter_translate_chunk, key_rotator, tried_keys)
+        else:
+            # Lỗi khác - không thể xử lý
+            return (f"[LỖI L{level}: {error_msg[:100]}]", False)
+
+def split_and_translate_recursive(model, chunk_lines, system_instruction, context, chunk_index, 
+                                   parent_index, level, max_level, use_google_ai, use_openrouter, 
+                                   api_key, model_name, openrouter_translate_chunk, 
+                                   key_rotator=None, tried_keys=None):
+    """
+    Chia chunk và dịch recursive từng phần.
+    Nếu thất bại ở level tối đa, thử retry với API key khác (Google AI only).
+    
+    Returns:
+        (combined_text, success_flag)
+    """
+    level_prefix = "   " * level
+    
+    # Initialize tried_keys tracking
+    if tried_keys is None:
+        tried_keys = set()
+    
+    # Chia chunk thành 2 phần
+    mid_point = len(chunk_lines) // 2
+    if mid_point < 3:  # Quá nhỏ để chia
+        print(f"{level_prefix}⚠️ Chunk quá nhỏ ({len(chunk_lines)} dòng), không thể chia thêm")
+        return (f"[QUÁ NHỎ - {len(chunk_lines)} DÒNG]", False)
+    
+    first_half = chunk_lines[:mid_point]
+    second_half = chunk_lines[mid_point:]
+    
+    print(f"{level_prefix}📦 Chia thành 2 phần: {len(first_half)} + {len(second_half)} dòng")
+    
+    # Dịch phần 1
+    first_result, first_success = translate_sub_chunk_recursive(
+        model, first_half, system_instruction, context, chunk_index, f"{parent_index}.1",
+        level, max_level, use_google_ai, use_openrouter, api_key, model_name, openrouter_translate_chunk,
+        key_rotator, tried_keys
+    )
+    
+    # Dịch phần 2
+    second_result, second_success = translate_sub_chunk_recursive(
+        model, second_half, system_instruction, context, chunk_index, f"{parent_index}.2",
+        level, max_level, use_google_ai, use_openrouter, api_key, model_name, openrouter_translate_chunk,
+        key_rotator, tried_keys
+    )
+    
+    # Kết hợp kết quả
+    combined = first_result
+    if not first_result.endswith('\n'):
+        combined += '\n'
+    combined += second_result
+    
+    success = first_success and second_success
+    
+    # Nếu thất bại ở level tối đa và có key_rotator (Google AI), thử với key khác
+    if not success and level == max_level and use_google_ai and key_rotator and key_rotator.is_multi_key:
+        current_key_hash = _get_key_hash(api_key) if api_key else None
+        
+        # Đánh dấu key hiện tại đã thử
+        if current_key_hash:
+            tried_keys.add(current_key_hash)
+        
+        # Thử lấy key khác chưa thử
+        available_keys = [k for k in key_rotator.keys if _get_key_hash(k) not in tried_keys]
+        
+        if available_keys:
+            new_key = available_keys[0]
+            new_key_hash = _get_key_hash(new_key)
+            tried_keys.add(new_key_hash)
+            
+            print(f"{level_prefix}🔄 Chia 3 levels vẫn thất bại, thử lại với API key khác (Key #{len(tried_keys)})...")
+            
+            # Tạo model mới với key mới
+            import google.generativeai as genai
+            genai.configure(api_key=new_key)
+            new_model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config={
+                    "temperature": 0.7,
+                    "top_p": 0.95,
+                    "top_k": 40,
+                    "max_output_tokens": 8192,
+                },
+                safety_settings={
+                    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                }
+            )
+            
+            # Retry toàn bộ chunk với key mới từ level 1
+            retry_result, retry_success = split_and_translate_recursive(
+                new_model, chunk_lines, system_instruction, context, chunk_index,
+                parent_index, 1, max_level, use_google_ai, use_openrouter,
+                new_key, model_name, openrouter_translate_chunk,
+                key_rotator, tried_keys
+            )
+            
+            if retry_success:
+                print(f"{level_prefix}✅ Retry với key khác THÀNH CÔNG!")
+                return (retry_result, True)
+            else:
+                print(f"{level_prefix}❌ Retry với key khác vẫn thất bại")
+                # Trả về kết quả ban đầu với marker
+                return (combined + f"\n[ĐÃ THỬ {len(tried_keys)} KEYS - VẪN THẤT BẠI]", False)
+        else:
+            print(f"{level_prefix}⚠️ Đã thử hết {len(tried_keys)} keys, không còn key nào khác")
+    
+    return (combined, success)
+
 def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None, context="modern", is_paid_key=False, adaptive_thread_manager=None):
     """
     Xử lý dịch một chunk với retry logic, rate limiting và re-chunking.
@@ -891,6 +1106,9 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
     use_google_ai = (provider == "Google AI")
     use_openrouter = (provider == "OpenRouter")
     
+    # Khởi tạo biến openrouter_translate_chunk trước (để tránh lỗi UnboundLocalError)
+    openrouter_translate_chunk = None
+    
     if use_google_ai:
         # Setup Google AI (với current API key từ rotator)
         try:
@@ -900,13 +1118,16 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
         except ImportError:
             error_text = format_error_chunk("IMPORT ERROR", "Google AI module không tìm thấy. Vui lòng cài đặt: pip install google-generativeai", chunk_lines, line_range)
             return (chunk_index, error_text, len(chunk_lines), line_range)
-    elif use_openrouter:
-        # Import OpenRouter translate function
+    
+    if use_openrouter:
+        # Import OpenRouter translate function - dùng tên tạm để tránh UnboundLocalError
         try:
-            from .open_router_translate import translate_chunk as openrouter_translate_chunk
+            from .open_router_translate import translate_chunk as _openrouter_func
+            openrouter_translate_chunk = _openrouter_func
         except ImportError:
             try:
-                from open_router_translate import translate_chunk as openrouter_translate_chunk
+                from open_router_translate import translate_chunk as _openrouter_func
+                openrouter_translate_chunk = _openrouter_func
             except ImportError:
                 error_text = format_error_chunk("IMPORT ERROR", "OpenRouter module không tìm thấy", chunk_lines, line_range)
                 return (chunk_index, error_text, len(chunk_lines), line_range)
@@ -1016,35 +1237,46 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                     
                 # Bản dịch xấu, thử lại
                 bad_translation_retries += 1
+                
+                # Kiểm tra nếu bị cắt do max_tokens - chia nhỏ ngay lập tức với recursive 3 level
+                if "[BỊ CẮT - CẦN CHUNK NHỎ HƠN]" in translated_text and len(chunk_lines) > 3:
+                    print(f"🔄 Chunk {chunk_index} bị cắt (max_tokens), sử dụng recursive splitting...")
+                    
+                    # Sử dụng recursive splitting với key_rotator support
+                    combined_result, success = split_and_translate_recursive(
+                        model, chunk_lines, system_instruction, context, chunk_index, "cut",
+                        level=1, max_level=3, use_google_ai=use_google_ai, use_openrouter=use_openrouter,
+                        api_key=api_key, model_name=model_name, openrouter_translate_chunk=openrouter_translate_chunk,
+                        key_rotator=key_rotator
+                    )
+                    
+                    if success:
+                        print(f"✅ Chunk {chunk_index} đã được chia nhỏ recursive và dịch thành công")
+                    else:
+                        print(f"⚠️ Chunk {chunk_index} đã chia nhỏ recursive nhưng một số phần thất bại")
+                    
+                    return (chunk_index, combined_result, len(chunk_lines), line_range)
+                
                 if bad_translation_retries < MAX_RETRIES_ON_BAD_TRANSLATION:
                     print(f"⚠️ Chunk {chunk_index} - bản dịch xấu lần {bad_translation_retries}, thử lại...")
                     time.sleep(RETRY_DELAY_SECONDS)
                 else:
-                    # Hết lần thử bad translation, thử chia nhỏ chunk (như OpenRouter)
-                    if len(chunk_lines) > 10:
-                        print(f"🔄 Chunk {chunk_index} vẫn bad sau {MAX_RETRIES_ON_BAD_TRANSLATION} lần thử, đang chia nhỏ...")
+                    # Hết lần thử bad translation, thử chia nhỏ chunk với recursive 3 level
+                    if len(chunk_lines) > 3:
+                        print(f"🔄 Chunk {chunk_index} vẫn bad sau {MAX_RETRIES_ON_BAD_TRANSLATION} lần thử, sử dụng recursive splitting...")
                         
-                        # Chia chunk thành các sub-chunks nhỏ hơn
-                        sub_chunks = split_large_chunk(chunk_lines, max_lines=max(10, len(chunk_lines) // 2))
-                        combined_result = ""
+                        # Sử dụng recursive splitting với key_rotator support
+                        combined_result, success = split_and_translate_recursive(
+                            model, chunk_lines, system_instruction, context, chunk_index, "bad",
+                            level=1, max_level=3, use_google_ai=use_google_ai, use_openrouter=use_openrouter,
+                            api_key=api_key, model_name=model_name, openrouter_translate_chunk=openrouter_translate_chunk,
+                            key_rotator=key_rotator
+                        )
                         
-                        for i, sub_chunk in enumerate(sub_chunks):
-                            try:
-                                if use_google_ai:
-                                    translated_sub, _, is_bad_sub = translate_chunk(model, sub_chunk, system_instruction, context)
-                                elif use_openrouter:
-                                    translated_sub, _, is_bad_sub = openrouter_translate_chunk(api_key, model_name, system_instruction, sub_chunk, context)
-                                
-                                if not is_bad_sub:
-                                    combined_result += translated_sub
-                                    if not translated_sub.endswith('\n'):
-                                        combined_result += '\n'
-                                else:
-                                    combined_result += format_error_chunk("SUB-CHUNK BAD", f"Sub-chunk {i+1} vẫn bad translation", sub_chunk, f"sub-{i+1}")
-                                    
-                            except Exception as sub_e:
-                                print(f"⚠️ Sub-chunk {i+1} cũng lỗi: {sub_e}")
-                                combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Sub-chunk {i+1} error: {str(sub_e)}", sub_chunk, f"sub-{i+1}")
+                        if success:
+                            print(f"✅ Chunk {chunk_index} đã được chia nhỏ recursive và dịch thành công")
+                        else:
+                            print(f"⚠️ Chunk {chunk_index} đã chia nhỏ recursive nhưng một số phần thất bại")
                         
                         return (chunk_index, combined_result, len(chunk_lines), line_range)
                     else:
@@ -1067,29 +1299,29 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                         # Google AI rate limit - có thể retry
                         print(f"⚠️ Google AI rate limit tại chunk {chunk_index}, sẽ retry...")
                         continue
-                    elif "context_length" in error_msg.lower() or "too long" in error_msg.lower():
-                        # Context length error - chia nhỏ chunk
-                        print(f"🔄 Chunk {chunk_index} quá lớn cho Google AI, đang chia nhỏ...")
-                        
-                        sub_chunks = split_large_chunk(chunk_lines, max_lines=max(10, len(chunk_lines) // 2))
-                        combined_result = ""
-                        
-                        for i, sub_chunk in enumerate(sub_chunks):
-                            try:
-                                translated_sub, _, is_bad_sub = translate_chunk(model, sub_chunk, system_instruction, context)
-                                
-                                if not is_bad_sub:
-                                    combined_result += translated_sub
-                                    if not translated_sub.endswith('\n'):
-                                        combined_result += '\n'
-                                else:
-                                    combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Google AI sub-chunk {i+1} failed", sub_chunk, f"sub-{i+1}")
-                                    
-                            except Exception as sub_e:
-                                print(f"⚠️ Google AI sub-chunk {i+1} cũng lỗi: {sub_e}")
-                                combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Google AI sub-chunk {i+1} error: {str(sub_e)}", sub_chunk, f"sub-{i+1}")
-                        
-                        return (chunk_index, combined_result, len(chunk_lines), line_range)
+                    elif "context_length" in error_msg.lower() or "too long" in error_msg.lower() or "maximum" in error_msg.lower():
+                        # Context length error - chia nhỏ chunk với recursive 3 level
+                        if len(chunk_lines) > 3:
+                            print(f"🔄 Chunk {chunk_index} quá lớn cho Google AI (context_length), sử dụng recursive splitting...")
+                            
+                            # Sử dụng recursive splitting với key_rotator support
+                            combined_result, success = split_and_translate_recursive(
+                                model, chunk_lines, system_instruction, context, chunk_index, "ctx",
+                                level=1, max_level=3, use_google_ai=use_google_ai, use_openrouter=use_openrouter,
+                                api_key=api_key, model_name=model_name, openrouter_translate_chunk=openrouter_translate_chunk,
+                                key_rotator=key_rotator
+                            )
+                            
+                            if success:
+                                print(f"✅ Chunk {chunk_index} context_length đã được xử lý thành công")
+                            else:
+                                print(f"⚠️ Chunk {chunk_index} context_length xử lý nhưng có một số phần thất bại")
+                            
+                            return (chunk_index, combined_result, len(chunk_lines), line_range)
+                        else:
+                            # Chunk quá nhỏ nhưng vẫn context_length error - lỗi nghiêm trọng
+                            error_text = format_error_chunk("CONTEXT LENGTH ERROR", f"Chunk quá nhỏ ({len(chunk_lines)} dòng) nhưng vẫn bị context_length: {error_msg}", chunk_lines, line_range)
+                            return (chunk_index, error_text, len(chunk_lines), line_range)
                     else:
                         # Google AI generic error
                         error_text = format_error_chunk("GOOGLE AI ERROR", f"Lỗi Google AI: {error_msg}", chunk_lines, line_range)
@@ -1238,8 +1470,6 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     if provider == "Google AI":
         is_multi_key = isinstance(api_key, list) and len(api_key) > 1
         
-        # Chỉ tự động điều chỉnh số threads khi người dùng cung cấp nhiều API keys (chế độ free)
-        # để tránh chạm vào giới hạn rate limit quá nhanh.
         if is_multi_key:
             num_keys = len(api_key)
             
@@ -1249,45 +1479,57 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
             else:
                 base_rpm = 10 # Ước tính an toàn cho các model Flash
             
-            # Tính toán threads thông minh dựa trên số keys và cấu hình máy
-            cpu_cores = cpu_count()
-            
-            # Base threads: 1-1.5 threads per key, nhưng cân nhắc CPU cores
-            base_threads_per_key = 1.2  # Trung bình 1.2 threads/key
-            threads_from_keys = int(num_keys * base_threads_per_key)
-            
-            # Threads từ CPU: I/O bound nên có thể dùng nhiều hơn cores
-            threads_from_cpu = min(cpu_cores * 3, 50)  # Tối đa 50 threads
-            
-            # Lấy min của 2 giá trị để cân bằng
-            max_threads_for_free_keys = min(threads_from_keys, threads_from_cpu)
-            
-            # Đảm bảo tối thiểu và tối đa hợp lý
-            max_threads_for_free_keys = max(max_threads_for_free_keys, min(num_keys, 5))  # Tối thiểu 5 hoặc số keys
-            max_threads_for_free_keys = min(max_threads_for_free_keys, 50)  # Tối đa 50 threads
-            
-            print(f"   Tinh toan threads:")
-            print(f"     • {num_keys} keys x {base_threads_per_key} = {threads_from_keys} threads")
-            print(f"     • {cpu_cores} CPU cores x 3 = {threads_from_cpu} threads")
-            print(f"     • Chon min({threads_from_keys}, {threads_from_cpu}) = {max_threads_for_free_keys} threads")
-            
-            if num_workers > max_threads_for_free_keys:
-                print(f"Google AI (Che do Free - {num_keys} keys):")
-                print(f"   Tong RPM uoc tinh: ~{base_rpm * num_keys} RPM")
-                print(f"   Dieu chinh Threads: {num_workers} -> {max_threads_for_free_keys} (toi uu cho {num_keys} keys)")
-                print(f"   Tham khao rate limits tai trang chu Google AI.")
-                num_workers = max_threads_for_free_keys
+            # NEW: Nếu số keys > 5, TIN TƯỞNG vào user input, không điều chỉnh tự động
+            if num_keys > 5:
+                print(f"Google AI (Nhiều Keys - {num_keys} keys):")
+                print(f"   Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
+                print(f"   ✅ Sử dụng {num_workers} threads theo cài đặt của người dùng.")
+                print(f"   💡 Với {num_keys} keys, bạn có thể tăng threads để tối ưu hiệu suất.")
+                print(f"   📌 Khuyến nghị: {num_keys * 2}-{num_keys * 3} threads cho hiệu suất tốt nhất.")
+                # Không điều chỉnh num_workers, dùng input của user
             else:
-                print(f"Google AI (Che do Free - {num_keys} keys):")
-                print(f"   Tong RPM uoc tinh: ~{base_rpm * num_keys} RPM")
-                print(f"   Su dung {num_workers} threads theo cai dat.")
+                # Chỉ tự động điều chỉnh số threads khi có <= 5 keys (chế độ free)
+                # để tránh chạm vào giới hạn rate limit quá nhanh.
+                
+                # Tính toán threads thông minh dựa trên số keys và cấu hình máy
+                cpu_cores = cpu_count()
+                
+                # Base threads: 1-1.5 threads per key, nhưng cân nhắc CPU cores
+                base_threads_per_key = 1.2  # Trung bình 1.2 threads/key
+                threads_from_keys = int(num_keys * base_threads_per_key)
+                
+                # Threads từ CPU: I/O bound nên có thể dùng nhiều hơn cores
+                threads_from_cpu = min(cpu_cores * 3, 50)  # Tối đa 50 threads
+                
+                # Lấy min của 2 giá trị để cân bằng
+                max_threads_for_free_keys = min(threads_from_keys, threads_from_cpu)
+                
+                # Đảm bảo tối thiểu và tối đa hợp lý
+                max_threads_for_free_keys = max(max_threads_for_free_keys, min(num_keys, 5))  # Tối thiểu 5 hoặc số keys
+                max_threads_for_free_keys = min(max_threads_for_free_keys, 50)  # Tối đa 50 threads
+                
+                print(f"   Tính toán threads:")
+                print(f"     • {num_keys} keys x {base_threads_per_key} = {threads_from_keys} threads")
+                print(f"     • {cpu_cores} CPU cores x 3 = {threads_from_cpu} threads")
+                print(f"     • Chọn min({threads_from_keys}, {threads_from_cpu}) = {max_threads_for_free_keys} threads")
+                
+                if num_workers > max_threads_for_free_keys:
+                    print(f"Google AI (Chế độ Free - {num_keys} keys):")
+                    print(f"   Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
+                    print(f"   Điều chỉnh Threads: {num_workers} -> {max_threads_for_free_keys} (tối ưu cho {num_keys} keys)")
+                    print(f"   Tham khảo rate limits tại trang chủ Google AI.")
+                    num_workers = max_threads_for_free_keys
+                else:
+                    print(f"Google AI (Chế độ Free - {num_keys} keys):")
+                    print(f"   Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
+                    print(f"   Sử dụng {num_workers} threads theo cài đặt.")
         else:
             # Với 1 key (chế độ trả phí hoặc 1 key free), tin tưởng vào setting của người dùng.
             # Key trả phí có RPM cao hơn nhiều.
-            print(f"Google AI (Che do 1 Key - Paid/Free):")
-            print(f"   Su dung {num_workers} threads theo cai dat cua nguoi dung.")
-            print(f"   Luu y: Neu dung key tra phi, ban co the tang so threads de dich nhanh hon.")
-            print(f"   Neu dung key free, hay can than voi rate limit.")
+            print(f"Google AI (Chế độ 1 Key - Paid/Free):")
+            print(f"   Sử dụng {num_workers} threads theo cài đặt của người dùng.")
+            print(f"   Lưu ý: Nếu dùng key trả phí, bạn có thể tăng số threads để dịch nhanh hơn.")
+            print(f"   Nếu dùng key free, hãy cẩn thận với rate limit.")
         
     if chunk_size_lines is None:
         chunk_size_lines = CHUNK_SIZE_LINES
@@ -1396,8 +1638,9 @@ Văn bản cần dịch:"""
             # Loop chính với adaptive thread management
             current_workers = num_workers
             restart_needed = False
+            translation_completed = False  # Flag để track completion
             
-            while True:
+            while not translation_completed:
                 print(f"🔧 Khởi động thread pool với {current_workers} workers...")
                 
                 # Dictionary để lưu trữ kết quả dịch theo thứ tự chunk index
@@ -1538,7 +1781,19 @@ Văn bản cần dịch:"""
                                 print(f"✅ Ghi chunk bị sót: {chunk_idx + 1} (lines {chunk_line_range})")
                             except Exception as e:
                                 print(f"❌ Lỗi khi ghi chunk {chunk_idx}: {e}")
-
+                
+                # Sau khi ThreadPoolExecutor hoàn thành, kiểm tra xem đã dịch hết chưa
+                if next_expected_chunk_to_write >= total_chunks:
+                    print(f"🎉 Đã hoàn thành tất cả {total_chunks} chunks!")
+                    translation_completed = True
+                    break  # Thoát vòng lặp while
+                
+                # Kiểm tra nếu bị dừng
+                if is_translation_stopped():
+                    print(f"⚠️ Phát hiện yêu cầu dừng, thoát vòng lặp...")
+                    translation_completed = True  # Đánh dấu để thoát
+                    break
+            
             # Kiểm tra xem có bị dừng giữa chừng không
             if is_translation_stopped():
                 if is_quota_exceeded():
