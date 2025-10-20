@@ -202,8 +202,8 @@ class KeyRotator:
         self.key_usage = {key: 0 for key in self.keys}  # Track usage count
         
         if self.is_multi_key:
-            print(f"🔄 Key Rotator: Đã khởi tạo với {len(self.keys)} keys")
-            print(f"💡 Hệ thống sẽ tự động xoay vòng giữa các keys để tối ưu RPM")
+            print(f"Key Rotator: Da khoi tao voi {len(self.keys)} keys")
+            print(f"He thong se tu dong xoay vong giua cac keys de toi uu RPM")
     
     def get_next_key(self):
         """Get next API key trong rotation"""
@@ -428,22 +428,39 @@ def validate_api_key_before_translation(api_key, model_name, provider="OpenRoute
         else:
             return False, f"Lỗi kết nối API: {error_msg}"
 
-def get_optimal_threads():
+def get_optimal_threads(num_api_keys=1, provider="OpenRouter"):
     """
-    Tự động tính toán số threads tối ưu dựa trên cấu hình máy.
+    Tự động tính toán số threads tối ưu dựa trên cấu hình máy và số lượng API keys.
+    
+    Args:
+        num_api_keys: Số lượng API keys (để tính toán threads phù hợp)
+        provider: Provider đang sử dụng
     """
     try:
         # Lấy số CPU cores
         cpu_cores = cpu_count()
         
-        # Tính toán threads tối ưu:
-        # - Với API calls, I/O bound nên có thể dùng nhiều threads hơn số cores
-        # - Nhưng không nên quá nhiều để tránh rate limiting
-        # - Formula: min(max(cpu_cores * 2, 4), 20)
-        optimal_threads = min(max(cpu_cores * 2, 4), 20)
-        
-        print(f"Phat hien {cpu_cores} CPU cores")
-        print(f"Threads toi uu duoc de xuat: {optimal_threads}")
+        if provider == "Google AI" and num_api_keys > 1:
+            # Với Google AI multiple keys, tính toán dựa trên keys
+            base_threads_per_key = 1.5  # Trung bình 1.5 threads/key
+            threads_from_keys = int(num_api_keys * base_threads_per_key)
+            threads_from_cpu = min(cpu_cores * 3, 50)  # I/O bound
+            
+            optimal_threads = min(threads_from_keys, threads_from_cpu)
+            optimal_threads = max(optimal_threads, min(num_api_keys, 5))  # Tối thiểu
+            optimal_threads = min(optimal_threads, 50)  # Tối đa
+            
+            print(f"Phat hien {cpu_cores} CPU cores")
+            print(f"Google AI voi {num_api_keys} keys:")
+            print(f"  Keys: {num_api_keys} x {base_threads_per_key} = {threads_from_keys} threads")
+            print(f"  CPU: {cpu_cores} x 3 = {threads_from_cpu} threads")
+            print(f"  Threads toi uu: {optimal_threads}")
+        else:
+            # Logic cũ cho single key hoặc OpenRouter
+            optimal_threads = min(max(cpu_cores * 2, 4), 20)
+            
+            print(f"Phat hien {cpu_cores} CPU cores")
+            print(f"Threads toi uu duoc de xuat: {optimal_threads}")
         
         return optimal_threads
         
@@ -473,8 +490,8 @@ def validate_chunk_size(chunk_size):
         chunk_size = int(chunk_size)
         if chunk_size < 10:
             return 10
-        elif chunk_size > 500:  # Tránh chunks quá lớn
-            return 500
+        elif chunk_size > 2000:  # Tránh chunks quá lớn
+            return 2000
         return chunk_size
     except (ValueError, TypeError):
         return 100  # Default
@@ -1000,81 +1017,122 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                 # Bản dịch xấu, thử lại
                 bad_translation_retries += 1
                 if bad_translation_retries < MAX_RETRIES_ON_BAD_TRANSLATION:
+                    print(f"⚠️ Chunk {chunk_index} - bản dịch xấu lần {bad_translation_retries}, thử lại...")
                     time.sleep(RETRY_DELAY_SECONDS)
                 else:
-                    # Hết lần thử bad translation, dùng bản dịch cuối
-                    return (chunk_index, translated_text + " [KHÔNG CẢI THIỆN ĐƯỢC]", len(chunk_lines), line_range)
+                    # Hết lần thử bad translation, thử chia nhỏ chunk (như OpenRouter)
+                    if len(chunk_lines) > 10:
+                        print(f"🔄 Chunk {chunk_index} vẫn bad sau {MAX_RETRIES_ON_BAD_TRANSLATION} lần thử, đang chia nhỏ...")
+                        
+                        # Chia chunk thành các sub-chunks nhỏ hơn
+                        sub_chunks = split_large_chunk(chunk_lines, max_lines=max(10, len(chunk_lines) // 2))
+                        combined_result = ""
+                        
+                        for i, sub_chunk in enumerate(sub_chunks):
+                            try:
+                                if use_google_ai:
+                                    translated_sub, _, is_bad_sub = translate_chunk(model, sub_chunk, system_instruction, context)
+                                elif use_openrouter:
+                                    translated_sub, _, is_bad_sub = openrouter_translate_chunk(api_key, model_name, system_instruction, sub_chunk, context)
+                                
+                                if not is_bad_sub:
+                                    combined_result += translated_sub
+                                    if not translated_sub.endswith('\n'):
+                                        combined_result += '\n'
+                                else:
+                                    combined_result += format_error_chunk("SUB-CHUNK BAD", f"Sub-chunk {i+1} vẫn bad translation", sub_chunk, f"sub-{i+1}")
+                                    
+                            except Exception as sub_e:
+                                print(f"⚠️ Sub-chunk {i+1} cũng lỗi: {sub_e}")
+                                combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Sub-chunk {i+1} error: {str(sub_e)}", sub_chunk, f"sub-{i+1}")
+                        
+                        return (chunk_index, combined_result, len(chunk_lines), line_range)
+                    else:
+                        # Chunk đã nhỏ, không thể chia thêm
+                        print(f"💾 Chunk {chunk_index} - đã thử {MAX_RETRIES_ON_BAD_TRANSLATION} lần và quá nhỏ để chia, lưu kết quả hiện tại")
+                        return (chunk_index, translated_text + " [KHÔNG CẢI THIỆN ĐƯỢC]", len(chunk_lines), line_range)
                     
             except Exception as e:
                 error_msg = str(e)
                 
-                # Kiểm tra từng loại lỗi OpenRouter cụ thể
-                if check_openrouter_quota_error(error_msg):
-                    # 402: Insufficient Credits - dừng hoàn toàn
-                    set_quota_exceeded()
-                    error_text = format_error_chunk("API HẾT QUOTA", f"OpenRouter hết credit (402): {error_msg}", chunk_lines, line_range)
-                    return (chunk_index, error_text, len(chunk_lines), line_range)
-                
-                elif check_openrouter_api_key_error(error_msg):
-                    # 401: Invalid Credentials - dừng hoàn toàn
-                    error_text = format_error_chunk("API KEY ERROR", f"API key không hợp lệ (401): {error_msg}", chunk_lines, line_range)
-                    return (chunk_index, error_text, len(chunk_lines), line_range)
-                
-                elif check_openrouter_rate_limit_error(error_msg):
-                    # 429: Rate Limit - có thể retry
-                    print(f"⚠️ Rate limit (429) tại chunk {chunk_index}, sẽ retry...")
-                    # Để tiếp tục retry loop thay vì return ngay
-                    continue
-                
-                elif check_openrouter_moderation_error(error_msg):
-                    # 403: Moderation - content bị block
-                    error_text = format_error_chunk("MODERATION ERROR", f"Nội dung vi phạm chính sách (403): {error_msg}", chunk_lines, line_range)
-                    return (chunk_index, error_text, len(chunk_lines), line_range)
-                
-                elif check_openrouter_timeout_error(error_msg):
-                    # 408: Timeout - có thể retry
-                    print(f"⚠️ Timeout (408) tại chunk {chunk_index}, sẽ retry...")
-                    continue
-                
-                elif check_openrouter_service_error(error_msg):
-                    # 502, 503: Service errors - có thể retry
-                    print(f"⚠️ Service error (502/503) tại chunk {chunk_index}, sẽ retry...")
-                    continue
-                
-                # Kiểm tra context length error và thử re-chunking
-                if ("context_length" in error_msg.lower() or 
-                    "too long" in error_msg.lower() or 
-                    "maximum context" in error_msg.lower()) and len(chunk_lines) > 10:
-                    
-                    print(f"🔄 Chunk {chunk_index} quá lớn, đang chia nhỏ để thử lại...")
-                    
-                    # Chia chunk thành các sub-chunks nhỏ hơn
-                    sub_chunks = split_large_chunk(chunk_lines, max_lines=max(10, len(chunk_lines) // 2))
-                    combined_result = ""
-                    
-                    for i, sub_chunk in enumerate(sub_chunks):
-                        try:
-                            if use_google_ai:
+                # Xử lý lỗi theo provider
+                if use_google_ai:
+                    # Google AI specific error handling
+                    if check_quota_error(error_msg):
+                        # Google AI quota exceeded
+                        set_quota_exceeded()
+                        error_text = format_error_chunk("API HẾT QUOTA", f"Google AI hết quota: {error_msg}", chunk_lines, line_range)
+                        return (chunk_index, error_text, len(chunk_lines), line_range)
+                    elif is_rate_limit_error(error_msg):
+                        # Google AI rate limit - có thể retry
+                        print(f"⚠️ Google AI rate limit tại chunk {chunk_index}, sẽ retry...")
+                        continue
+                    elif "context_length" in error_msg.lower() or "too long" in error_msg.lower():
+                        # Context length error - chia nhỏ chunk
+                        print(f"🔄 Chunk {chunk_index} quá lớn cho Google AI, đang chia nhỏ...")
+                        
+                        sub_chunks = split_large_chunk(chunk_lines, max_lines=max(10, len(chunk_lines) // 2))
+                        combined_result = ""
+                        
+                        for i, sub_chunk in enumerate(sub_chunks):
+                            try:
                                 translated_sub, _, is_bad_sub = translate_chunk(model, sub_chunk, system_instruction, context)
-                            elif use_openrouter:
-                                translated_sub, _, is_bad_sub = openrouter_translate_chunk(api_key, model_name, system_instruction, sub_chunk, context)
-                            
-                            if not is_bad_sub:
-                                combined_result += translated_sub
-                                if not translated_sub.endswith('\n'):
-                                    combined_result += '\n'
-                            else:
-                                combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Sub-chunk {i+1} failed", sub_chunk, f"sub-{i+1}")
                                 
-                        except Exception as sub_e:
-                            print(f"⚠️ Sub-chunk {i+1} cũng lỗi: {sub_e}")
-                            combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Sub-chunk {i+1} error: {str(sub_e)}", sub_chunk, f"sub-{i+1}")
-                    
-                    return (chunk_index, combined_result, len(chunk_lines), line_range)
+                                if not is_bad_sub:
+                                    combined_result += translated_sub
+                                    if not translated_sub.endswith('\n'):
+                                        combined_result += '\n'
+                                else:
+                                    combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Google AI sub-chunk {i+1} failed", sub_chunk, f"sub-{i+1}")
+                                    
+                            except Exception as sub_e:
+                                print(f"⚠️ Google AI sub-chunk {i+1} cũng lỗi: {sub_e}")
+                                combined_result += format_error_chunk("SUB-CHUNK ERROR", f"Google AI sub-chunk {i+1} error: {str(sub_e)}", sub_chunk, f"sub-{i+1}")
+                        
+                        return (chunk_index, combined_result, len(chunk_lines), line_range)
+                    else:
+                        # Google AI generic error
+                        error_text = format_error_chunk("GOOGLE AI ERROR", f"Lỗi Google AI: {error_msg}", chunk_lines, line_range)
+                        return (chunk_index, error_text, len(chunk_lines), line_range)
                 
-                # Lỗi khác - lưu lại với nội dung gốc
-                error_text = format_error_chunk("API ERROR", f"Lỗi khi gọi API: {error_msg}", chunk_lines, line_range)
-                return (chunk_index, error_text, len(chunk_lines), line_range)
+                elif use_openrouter:
+                    # OpenRouter specific error handling (existing logic)
+                    if check_openrouter_quota_error(error_msg):
+                        # 402: Insufficient Credits - dừng hoàn toàn
+                        set_quota_exceeded()
+                        error_text = format_error_chunk("API HẾT QUOTA", f"OpenRouter hết credit (402): {error_msg}", chunk_lines, line_range)
+                        return (chunk_index, error_text, len(chunk_lines), line_range)
+                
+                    elif check_openrouter_api_key_error(error_msg):
+                        # 401: Invalid Credentials - dừng hoàn toàn
+                        error_text = format_error_chunk("API KEY ERROR", f"API key không hợp lệ (401): {error_msg}", chunk_lines, line_range)
+                        return (chunk_index, error_text, len(chunk_lines), line_range)
+                
+                    elif check_openrouter_rate_limit_error(error_msg):
+                        # 429: Rate Limit - có thể retry
+                        print(f"⚠️ Rate limit (429) tại chunk {chunk_index}, sẽ retry...")
+                        # Để tiếp tục retry loop thay vì return ngay
+                        continue
+                
+                    elif check_openrouter_moderation_error(error_msg):
+                        # 403: Moderation - content bị block
+                        error_text = format_error_chunk("MODERATION ERROR", f"Nội dung vi phạm chính sách (403): {error_msg}", chunk_lines, line_range)
+                        return (chunk_index, error_text, len(chunk_lines), line_range)
+                
+                    elif check_openrouter_timeout_error(error_msg):
+                        # 408: Timeout - có thể retry
+                        print(f"⚠️ Timeout (408) tại chunk {chunk_index}, sẽ retry...")
+                        continue
+                
+                    elif check_openrouter_service_error(error_msg):
+                        # 502, 503: Service errors - có thể retry
+                        print(f"⚠️ Service error (502/503) tại chunk {chunk_index}, sẽ retry...")
+                        continue
+                
+                else:
+                    # Generic error cho cả hai provider
+                    error_text = format_error_chunk("API ERROR", f"Lỗi khi gọi API: {error_msg}", chunk_lines, line_range)
+                    return (chunk_index, error_text, len(chunk_lines), line_range)
         
         # Nếu bị chặn safety, thử lại
         if is_safety_blocked:
@@ -1191,28 +1249,45 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
             else:
                 base_rpm = 10 # Ước tính an toàn cho các model Flash
             
-            # Giới hạn số threads để tránh burst limit. 
-            # Quy tắc chung: 1-2 threads cho mỗi key.
-            # Ở đây ta dùng 1 thread/key, tối đa 5 threads tổng.
-            max_threads_for_free_keys = min(num_keys * 1, 5)
+            # Tính toán threads thông minh dựa trên số keys và cấu hình máy
+            cpu_cores = cpu_count()
+            
+            # Base threads: 1-1.5 threads per key, nhưng cân nhắc CPU cores
+            base_threads_per_key = 1.2  # Trung bình 1.2 threads/key
+            threads_from_keys = int(num_keys * base_threads_per_key)
+            
+            # Threads từ CPU: I/O bound nên có thể dùng nhiều hơn cores
+            threads_from_cpu = min(cpu_cores * 3, 50)  # Tối đa 50 threads
+            
+            # Lấy min của 2 giá trị để cân bằng
+            max_threads_for_free_keys = min(threads_from_keys, threads_from_cpu)
+            
+            # Đảm bảo tối thiểu và tối đa hợp lý
+            max_threads_for_free_keys = max(max_threads_for_free_keys, min(num_keys, 5))  # Tối thiểu 5 hoặc số keys
+            max_threads_for_free_keys = min(max_threads_for_free_keys, 50)  # Tối đa 50 threads
+            
+            print(f"   Tinh toan threads:")
+            print(f"     • {num_keys} keys x {base_threads_per_key} = {threads_from_keys} threads")
+            print(f"     • {cpu_cores} CPU cores x 3 = {threads_from_cpu} threads")
+            print(f"     • Chon min({threads_from_keys}, {threads_from_cpu}) = {max_threads_for_free_keys} threads")
             
             if num_workers > max_threads_for_free_keys:
-                print(f"🔧 Google AI (Chế độ Free - {num_keys} keys):")
-                print(f"   📊 Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
-                print(f"   ⚡ Điều chỉnh Threads: {num_workers} → {max_threads_for_free_keys} (1 thread/key để tránh burst limit)")
-                print(f"   🌐 Tham khảo rate limits tại trang chủ Google AI.")
+                print(f"Google AI (Che do Free - {num_keys} keys):")
+                print(f"   Tong RPM uoc tinh: ~{base_rpm * num_keys} RPM")
+                print(f"   Dieu chinh Threads: {num_workers} -> {max_threads_for_free_keys} (toi uu cho {num_keys} keys)")
+                print(f"   Tham khao rate limits tai trang chu Google AI.")
                 num_workers = max_threads_for_free_keys
             else:
-                print(f"🚀 Google AI (Chế độ Free - {num_keys} keys):")
-                print(f"   📊 Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
-                print(f"   ⚡ Sử dụng {num_workers} threads theo cài đặt.")
+                print(f"Google AI (Che do Free - {num_keys} keys):")
+                print(f"   Tong RPM uoc tinh: ~{base_rpm * num_keys} RPM")
+                print(f"   Su dung {num_workers} threads theo cai dat.")
         else:
             # Với 1 key (chế độ trả phí hoặc 1 key free), tin tưởng vào setting của người dùng.
             # Key trả phí có RPM cao hơn nhiều.
-            print(f"💳 Google AI (Chế độ 1 Key - Paid/Free):")
-            print(f"   ⚡ Sử dụng {num_workers} threads theo cài đặt của người dùng.")
-            print(f"   💡 Lưu ý: Nếu dùng key trả phí, bạn có thể tăng số threads để dịch nhanh hơn.")
-            print(f"   ⚠️ Nếu dùng key free, hãy cẩn thận với rate limit.")
+            print(f"Google AI (Che do 1 Key - Paid/Free):")
+            print(f"   Su dung {num_workers} threads theo cai dat cua nguoi dung.")
+            print(f"   Luu y: Neu dung key tra phi, ban co the tang so threads de dich nhanh hon.")
+            print(f"   Neu dung key free, hay can than voi rate limit.")
         
     if chunk_size_lines is None:
         chunk_size_lines = CHUNK_SIZE_LINES

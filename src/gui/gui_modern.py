@@ -1,3 +1,15 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+
+# Set console encoding to UTF-8 for Windows
+if sys.platform.startswith('win'):
+    try:
+        # Try to set console to UTF-8
+        os.system('chcp 65001 > nul')
+    except:
+        pass
+
 import customtkinter as ctk
 from tkinter import filedialog
 import threading
@@ -400,6 +412,17 @@ class ModernTranslateNovelAI(ctk.CTk):
         )
         self.threads_entry.grid(row=0, column=1, padx=(5, 0), sticky="e")
         
+        # Auto-detect button
+        self.auto_threads_btn = ctk.CTkButton(
+            self.threads_frame,
+            text="🔧",
+            command=self.auto_detect_threads,
+            width=25,
+            height=28,
+            font=ctk.CTkFont(size=10)
+        )
+        self.auto_threads_btn.grid(row=0, column=2, padx=(2, 0))
+        
         # Chunk size setting
         self.chunk_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
         self.chunk_frame.grid(row=15, column=0, padx=20, pady=5, sticky="ew")
@@ -415,6 +438,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         self.chunk_entry = ctk.CTkEntry(
             self.chunk_frame,
             textvariable=self.chunk_size_var,
+            placeholder_text="10-2000",
             width=60,
             height=28
         )
@@ -782,8 +806,8 @@ class ModernTranslateNovelAI(ctk.CTk):
         
         if provider == "OpenRouter":
             base_models = [
-
-                "openai/gpt-4o-mini"
+                "anthropic/claude-3.5-sonnet",
+                "openai/gpt-4o-mini",
                 "google/gemini-2.0-flash-001",
                 "google/gemini-1.5-pro"
             ]
@@ -978,27 +1002,34 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
     def auto_detect_threads(self, silent=False):
         """Tự động phát hiện số threads tối ưu cho máy và provider"""
         try:
-            # Import hàm get_optimal_threads từ open_router_translate
-            from .core.open_router_translate import get_optimal_threads
+            # Import hàm get_optimal_threads từ translate module
+            try:
+                from ..core.translate import get_optimal_threads
+            except ImportError:
+                from core.translate import get_optimal_threads
             
-            # Lấy thông tin provider và model name
+            # Lấy thông tin provider và API keys
             provider = self.get_current_provider()
             model_name = self.model_var.get()
+            api_key = self.get_current_api_key()
             
-            # Kiểm tra xem có phải Gemini free model cụ thể không
-            is_gemini_free = "google/gemini-2.0-flash-exp:free" in model_name.lower()
+            # Tính số lượng API keys
+            if provider == "Google AI" and isinstance(api_key, list):
+                num_api_keys = len(api_key)
+            else:
+                num_api_keys = 1
             
-            # Tính toán threads tối ưu dựa trên provider và model name
-            optimal_threads = get_optimal_threads(provider=provider, model_name=model_name)
+            # Tính toán threads tối ưu dựa trên provider và số keys
+            optimal_threads = get_optimal_threads(num_api_keys=num_api_keys, provider=provider)
             
             self.threads_var.set(str(optimal_threads))
             
             if not silent:
-                message = f"Đã đặt threads tối ưu: {optimal_threads}\n(Provider: {provider}, Model: {model_name})"
-                
-                # Thêm tip cho Gemini free model
-                if is_gemini_free:
-                    message += f"\n\n💡 TIP: Gemini Free model có rate limit cực chặt, đã tự động:\n• Giảm threads xuống {optimal_threads}\n• Thêm delay 500ms giữa requests\n• Tăng retry lên 5 lần"
+                if num_api_keys > 1:
+                    message = f"Đã đặt threads tối ưu: {optimal_threads}\n(Provider: {provider}, {num_api_keys} API keys)"
+                    message += f"\n\n💡 TIP: Với {num_api_keys} keys, hệ thống có thể chạy {optimal_threads} threads đồng thời để tối ưu tốc độ!"
+                else:
+                    message = f"Đã đặt threads tối ưu: {optimal_threads}\n(Provider: {provider}, Model: {model_name})"
                 
                 show_success(message, parent=self)
                 
@@ -1102,9 +1133,18 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             if hasattr(self, 'update_idletasks'):
                 self.update_idletasks()
             
-            print(message)  # Also print to console
+            # Safe console printing - remove emojis for console
+            try:
+                console_message = message.encode('ascii', 'ignore').decode('ascii')
+                print(console_message)
+            except:
+                pass  # Skip console printing if encoding fails
         except Exception as e:
-            print(f"⚠️ Lỗi log GUI: {e} - Message: {message}")
+            try:
+                error_msg = f"Loi log GUI: {str(e)}"
+                print(error_msg.encode('ascii', 'ignore').decode('ascii'))
+            except:
+                pass
     
     def clear_logs(self):
         """Xóa logs"""
@@ -1243,8 +1283,8 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             
         try:
             chunk_size = int(self.chunk_size_var.get())
-            if chunk_size < 10 or chunk_size > 500:
-                show_warning("Chunk size phải từ 10 đến 500!", parent=self)
+            if chunk_size < 10 or chunk_size > 2000:
+                show_warning("Chunk size phải từ 10 đến 2000!", parent=self)
                 return
         except ValueError:
             show_warning("Chunk size phải là số nguyên!", parent=self)
@@ -1788,25 +1828,28 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
         api_key = self.get_current_api_key()
         model = self.get_current_model()
         
-        # For Google AI, if multiple free keys are provided, test the first one.
+        # For Google AI, test all keys if multiple keys are provided
         if provider == "Google AI" and isinstance(api_key, list):
             if not api_key:
                 self.log("❌ Vui lòng nhập ít nhất một Google AI API key.")
                 show_error("Vui lòng nhập ít nhất một Google AI API key.", parent=self)
                 self.test_api_btn.configure(state="normal", text="🧪 Test API")
                 return
-            api_key_to_test = api_key[0]
+            
+            # Test all keys
+            self.log(f"🔍 Sẽ kiểm tra tất cả {len(api_key)} API keys...")
+            threading.Thread(target=self._run_multiple_api_test, args=(api_key, model, provider), daemon=True).start()
         else:
+            # Single key test
             api_key_to_test = api_key
+            if not api_key_to_test:
+                provider_name = "OpenRouter" if provider == "OpenRouter" else "Google AI"
+                self.log(f"❌ Vui lòng nhập API key cho {provider_name}.")
+                show_error(f"Vui lòng nhập API key cho {provider_name}.", parent=self)
+                self.test_api_btn.configure(state="normal", text="🧪 Test API")
+                return
 
-        if not api_key_to_test:
-            provider_name = "OpenRouter" if provider == "OpenRouter" else "Google AI"
-            self.log(f"❌ Vui lòng nhập API key cho {provider_name}.")
-            show_error(f"Vui lòng nhập API key cho {provider_name}.", parent=self)
-            self.test_api_btn.configure(state="normal", text="🧪 Test API")
-            return
-f
-        threading.Thread(target=self._run_api_test, args=(api_key_to_test, model, provider), daemon=True).start()
+            threading.Thread(target=self._run_api_test, args=(api_key_to_test, model, provider), daemon=True).start()
 
     def _run_api_test(self, api_key, model, provider):
         """Worker function to test API."""
@@ -1822,6 +1865,47 @@ f
             self.test_api_btn.configure(state="normal", text="🧪 Test API")
 
         self.after(0, update_ui)
+    
+    def _run_multiple_api_test(self, api_keys, model, provider):
+        """Worker function to test multiple API keys."""
+        valid_keys = 0
+        invalid_keys = 0
+        results = []
+        
+        for i, api_key in enumerate(api_keys, 1):
+            self.after(0, lambda idx=i: self.log(f"🧪 Đang test key #{idx}..."))
+            
+            is_valid, message = validate_api_key_before_translation(api_key, model, provider)
+            
+            # Mask the key for display
+            masked_key = api_key[:8] + "***" + api_key[-4:] if len(api_key) > 12 else "***"
+            
+            if is_valid:
+                valid_keys += 1
+                result_msg = f"✅ Key #{i} ({masked_key}): {message}"
+                results.append(result_msg)
+                self.after(0, lambda msg=result_msg: self.log(msg))
+            else:
+                invalid_keys += 1
+                result_msg = f"❌ Key #{i} ({masked_key}): {message}"
+                results.append(result_msg)
+                self.after(0, lambda msg=result_msg: self.log(msg))
+        
+        # Final summary
+        def update_final_ui():
+            summary = f"📊 Kết quả test: {valid_keys} keys hợp lệ, {invalid_keys} keys lỗi"
+            self.log(summary)
+            
+            if valid_keys > 0:
+                details = f"Keys hợp lệ: {valid_keys}/{len(api_keys)}\n\n" + "\n".join(results)
+                show_success(f"Test hoàn thành!\n{summary}", details=details, parent=self)
+            else:
+                details = "Tất cả keys đều lỗi:\n\n" + "\n".join(results)
+                show_error(f"Test thất bại!\n{summary}", details=details, parent=self)
+            
+            self.test_api_btn.configure(state="normal", text="🧪 Test API")
+        
+        self.after(0, update_final_ui)
     
     def set_light_mode(self):
         """Chuyển sang chế độ sáng"""
