@@ -204,11 +204,12 @@ if __name__ == "__main__":
         author = "Unknown Author"
         print(f"Sử dụng tác giả mặc định: {author}")
 
-    default_chapter_regex = r"^Chương\s+\d+:\s+.*$"
+    default_chapter_regex = r"^Chương\s+\d+(?::\s+.*)?$"
     
     custom_regex = input(
         f"Nhập biểu thức chính quy (regex) để nhận diện chương (mặc định: '{default_chapter_regex}'):\n"
         f"  (Ví dụ: '^Phần\\s+\\d+\\.\\s+.*$' cho 'Phần 1. Tên Phần')\n"
+        f"  (Regex mặc định hỗ trợ cả 'Chương 01' và 'Chương 01: Tên Chương')\n"
         f"Nhập bỏ trống để dùng mặc định: "
     )
 

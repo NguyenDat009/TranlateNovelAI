@@ -6,18 +6,28 @@ import re
 import concurrent.futures
 import threading
 from multiprocessing import cpu_count
+import math
+from typing import Optional
 from itertools import cycle
 
-# Import rate limiter for Google AI
+# Import ENHANCED rate limiter for Google AI (with TPM/RPD tracking)
 try:
-    from .rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
+    from .enhanced_rate_limiter import EnhancedRateLimiter, ImprovedKeyRotator
+    from .rate_limiter import exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
 except ImportError:
     try:
-        from rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
+        from enhanced_rate_limiter import EnhancedRateLimiter, ImprovedKeyRotator
+        from rate_limiter import exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
     except ImportError:
-        print("⚠️ Rate limiter module not found")
-        def get_rate_limiter(*args, **kwargs):
-            return None
+        print("⚠️ Enhanced rate limiter module not found, falling back to basic")
+        try:
+            from .rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
+            EnhancedRateLimiter = None
+            ImprovedKeyRotator = None
+        except ImportError:
+            from rate_limiter import get_rate_limiter, exponential_backoff_sleep, is_rate_limit_error, _get_key_hash
+            EnhancedRateLimiter = None
+            ImprovedKeyRotator = None
         def exponential_backoff_sleep(retry_count, base_delay=2.0, max_delay=120.0):
             """
             Improved exponential backoff với jitter để tránh thundering herd
@@ -58,6 +68,64 @@ MAX_RETRIES_ON_RATE_LIMIT = 5  # Tăng số lần retry khi gặp rate limit đ�
 RETRY_DELAY_SECONDS = 2
 PROGRESS_FILE_SUFFIX = ".progress.json"
 CHUNK_SIZE = 1024 * 1024  # 1MB (Không còn dùng trực tiếp CHUNK_SIZE cho việc đọc file nữa)
+
+# --- DEBUG RESPONSE LOGGING ---
+DEBUG_RESPONSE_ENABLED = True  # Bật/tắt debug logging
+DEBUG_RESPONSE_LOCK = threading.Lock()
+
+def save_debug_response(chunk_index, response_text, chunk_lines, input_file, provider="Unknown", model_name="Unknown", key_hash="Unknown"):
+    """
+    Lưu response ngay lập tức vào file debug để kiểm tra.
+    File debug sẽ được lưu cùng thư mục với input file.
+    
+    Args:
+        chunk_index: Số thứ tự chunk
+        response_text: Nội dung response từ API
+        chunk_lines: Nội dung gốc của chunk
+        input_file: Đường dẫn file input
+        provider: Provider name (OpenRouter/Google AI)
+        model_name: Tên model
+        key_hash: Hash của API key đang dùng
+    """
+    if not DEBUG_RESPONSE_ENABLED:
+        return
+    
+    try:
+        # Tạo tên file debug dựa trên input file
+        input_dir = os.path.dirname(input_file)
+        input_basename = os.path.basename(input_file)
+        input_name = os.path.splitext(input_basename)[0]
+        
+        debug_file = os.path.join(input_dir, f"{input_name}_debug_responses.txt")
+        
+        # Lưu vào file với thread-safe
+        with DEBUG_RESPONSE_LOCK:
+            with open(debug_file, 'a', encoding='utf-8') as f:
+                # Thêm separator và metadata
+                f.write("\n" + "="*80 + "\n")
+                f.write(f"CHUNK #{chunk_index} - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Provider: {provider} | Model: {model_name} | Key: ***{key_hash}\n")
+                f.write("-"*80 + "\n")
+                
+                # Ghi nội dung gốc
+                f.write("【ORIGINAL TEXT】:\n")
+                f.write("\n".join(chunk_lines[:3]))  # Chỉ lưu 3 dòng đầu để tham khảo
+                if len(chunk_lines) > 3:
+                    f.write(f"\n... ({len(chunk_lines) - 3} more lines)")
+                f.write("\n\n")
+                
+                # Ghi response
+                f.write("【API RESPONSE】:\n")
+                f.write(response_text)
+                f.write("\n")
+                f.write("="*80 + "\n\n")
+        
+        # Log thông báo (chỉ log lần đầu)
+        if chunk_index <= 1:
+            print(f"🐛 Debug mode ON - Responses được lưu vào: {os.path.basename(debug_file)}")
+            
+    except Exception as e:
+        print(f"⚠️ Lỗi khi lưu debug response: {e}")
 
 # --- ADAPTIVE THREAD SCALING ---
 class AdaptiveThreadManager:
@@ -229,6 +297,28 @@ class KeyRotator:
             print(f"   Key #{idx} ({masked_key}): {count} requests")
         print()
 
+
+def create_key_rotator(api_keys, same_project=False):
+    """
+    Tạo key rotator (ImprovedKeyRotator nếu có, fallback về KeyRotator)
+    
+    Args:
+        api_keys: List of API keys hoặc single key
+        same_project: Tất cả keys có cùng project không
+        
+    Returns:
+        KeyRotator instance (Improved hoặc basic)
+    """
+    if ImprovedKeyRotator is not None:
+        # Sử dụng ImprovedKeyRotator với health tracking
+        print("✨ Sử dụng ImprovedKeyRotator (với health tracking)")
+        return ImprovedKeyRotator(api_keys, same_project=same_project)
+    else:
+        # Fallback về KeyRotator cơ bản
+        print("⚠️ Fallback về KeyRotator cơ bản")
+        return KeyRotator(api_keys)
+
+
 def set_stop_translation():
     """Dừng tiến trình dịch"""
     global _stop_event
@@ -241,6 +331,7 @@ def clear_stop_translation():
     _stop_event.clear()
     _quota_exceeded.clear()
     print("▶️ Đã xóa flag dừng, sẵn sàng tiếp tục...")
+
 
 def is_translation_stopped():
     """Kiểm tra xem có yêu cầu dừng không"""
@@ -497,6 +588,161 @@ def validate_chunk_size(chunk_size):
         return 100  # Default
 
 
+# Enhanced rate limiter cache
+_enhanced_rate_limiters = {}
+_enhanced_lock = threading.Lock()
+
+
+def get_enhanced_rate_limiter(model_name: str, provider: str = "Google AI", api_key: str = None, is_paid_key: bool = False, desired_rpm: Optional[int] = None):
+    """
+    Get hoặc tạo ENHANCED rate limiter với TPM/RPD tracking
+    
+    IMPORTANT: Google AI Free tier rate limits are PER-PROJECT (not per-key!)
+    Multiple keys from same project share the SAME rate limit.
+    
+    Args:
+        model_name: Tên model
+        provider: Provider (chỉ áp dụng cho Google AI)
+        api_key: API key (IGNORED for free keys - use global limiter)
+        is_paid_key: Key trả phí hay free
+        
+    Returns:
+        EnhancedRateLimiter instance hoặc None nếu không cần rate limiting
+    """
+    # Chỉ rate limit cho Google AI
+    if provider != "Google AI":
+        return None
+    
+    # Fallback nếu không có EnhancedRateLimiter
+    if EnhancedRateLimiter is None:
+        print("⚠️ EnhancedRateLimiter not available, skipping rate limiting")
+        return None
+    
+    with _enhanced_lock:
+        # 🚨 CRITICAL: Free keys use GLOBAL limiter (per-project rate limit)
+        # Paid keys can use per-key limiter (higher limits)
+        if is_paid_key and api_key:
+            key_hash = _get_key_hash(api_key)
+            limiter_key = f"{model_name}_{key_hash}"
+        else:
+            # FREE KEYS: Use GLOBAL limiter for all keys (same project = shared limit)
+            limiter_key = f"{model_name}_GLOBAL_FREE"
+        
+        if limiter_key not in _enhanced_rate_limiters:
+            # Xác định RPM, TPM, RPD dựa trên model
+            rpm = 10  # Default
+            tpm = None
+            rpd = None
+            
+            if is_paid_key:
+                # Paid keys: Very high limits
+                rpm = 900
+                tpm = 4000000  # 4M TPM
+                rpd = None  # Unlimited
+                safe_rpm = rpm
+                safe_tpm = tpm
+                
+                key_display = f"key_***{key_hash}" if api_key else "default"
+                print(f"🔧 [Enhanced] Tạo rate limiter cho model: {model_name} ({key_display})")
+                print(f"   💳 Paid Key: {safe_rpm} RPM, {safe_tpm:,} TPM, Unlimited RPD")
+            else:
+                # Free keys: Model-specific limits
+                # Reference: https://ai.google.dev/gemini-api/docs/rate-limits
+                # Updated October 2025: gemini-2.5-flash RPM reduced to 5
+                if "2.0-flash-lite" in model_name.lower():
+                    rpm, tpm, rpd = 30, 1000000, 200
+                elif "2.0-flash" in model_name.lower():
+                    rpm, tpm, rpd = 15, 1000000, 200
+                elif "2.5-flash-lite" in model_name.lower():
+                    rpm, tpm, rpd = 15, 1000000, 200
+                elif "2.5-flash" in model_name.lower():
+                    rpm, tpm, rpd = 5, 250000, 250  # ⚠️ UPDATED: 5 RPM (not 10)
+                elif "2.5-pro" in model_name.lower():
+                    rpm, tpm, rpd = 5, 250000, 250
+                elif "1.5-flash" in model_name.lower():
+                    rpm, tpm, rpd = 15, 1000000, 1500
+                elif "1.5-pro" in model_name.lower():
+                    rpm, tpm, rpd = 2, 32000, 50
+                else:
+                    rpm, tpm, rpd = 15, 1000000, 200  # Default safe
+                
+                # Safety factor 85%
+                safe_rpm = int(rpm * 0.85)
+                safe_tpm = int(tpm * 0.85) if tpm else None
+                safe_rpd = int(rpd * 0.85) if rpd else None
+                
+                if safe_rpm < 1:
+                    safe_rpm = 1
+
+            # Apply user-desired RPM override (clamped to safe_rpm)
+            if desired_rpm is not None:
+                try:
+                    desired_rpm = int(desired_rpm)
+                    if desired_rpm > 0:
+                        original_safe = safe_rpm
+                        safe_rpm = max(1, min(safe_rpm, desired_rpm))
+                        if original_safe != safe_rpm:
+                            print(f"🎛️ Override RPM từ UI: {original_safe} → {safe_rpm} RPM (clamped to model-safe)")
+                    else:
+                        print("⚠️ desired_rpm không hợp lệ (<=0), bỏ qua override")
+                except (ValueError, TypeError):
+                    print("⚠️ desired_rpm không hợp lệ, bỏ qua override")
+                
+                # Display info based on limiter type
+                if limiter_key.endswith("_GLOBAL_FREE"):
+                    print(f"🔧 [Enhanced] Tạo GLOBAL rate limiter cho model: {model_name}")
+                    print(f"   📊 Gốc: {rpm} RPM, {tpm:,} TPM, {rpd} RPD (PER-PROJECT)")
+                    print(f"   🛡️ Safe (85%): {safe_rpm} RPM, {safe_tpm:,} TPM, {safe_rpd} RPD")
+                    print(f"   🌐 GLOBAL: Tất cả keys chia sẻ CHUNG rate limit này")
+                    print(f"   ℹ️ Multiple keys CHỈ để failover/backup, KHÔNG tăng throughput")
+                else:
+                    key_display = f"key_***{key_hash}" if api_key else "default"
+                    print(f"🔧 [Enhanced] Tạo rate limiter cho model: {model_name} ({key_display})")
+                    print(f"   📊 Gốc: {rpm} RPM, {tpm:,} TPM, {rpd} RPD")
+                    print(f"   🛡️ Safe (85%): {safe_rpm} RPM, {safe_tpm:,} TPM, {safe_rpd} RPD")
+                    print(f"   ℹ️ Per-key rate limit (paid key)")
+            
+            # Tạo EnhancedRateLimiter
+            _enhanced_rate_limiters[limiter_key] = EnhancedRateLimiter(
+                requests_per_minute=safe_rpm,
+                tokens_per_minute=safe_tpm,
+                requests_per_day=safe_rpd,
+                window_seconds=60
+            )
+        
+        return _enhanced_rate_limiters[limiter_key]
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Ước tính số tokens từ text
+    
+    Args:
+        text: Text cần ước tính
+        
+    Returns:
+        Số tokens ước tính
+        
+    Note:
+        - Tiếng Anh: ~4 chars/token
+        - Tiếng Việt/Trung: ~2-3 chars/token
+        - Conservative estimate để an toàn
+    """
+    if not text:
+        return 0
+    
+    char_count = len(text)
+    
+    # Heuristic: 2.5 chars per token (conservative for Vietnamese/Chinese)
+    # English là ~4 chars/token nhưng Asian languages dày hơn
+    estimated_tokens = int(char_count / 2.5)
+    
+    # Add 10% buffer for safety
+    estimated_tokens = int(estimated_tokens * 1.1)
+    
+    return max(1, estimated_tokens)  # At least 1 token
+
+
 # Default values
 NUM_WORKERS = get_optimal_threads()  # Tự động tính theo máy
 
@@ -524,6 +770,37 @@ def format_error_chunk(error_type: str, error_message: str, original_lines: list
 
 """
     return error_output
+
+
+def threads_from_rpm(rpm: int, avg_latency_s: float = 2.0, safety: float = 0.85, max_threads: int = 50, min_threads: int = 1) -> int:
+    """
+    Tính số threads đề xuất dựa trên RPM mục tiêu để tránh rate limit.
+
+    Ý tưởng (Little's Law): concurrency ≈ throughput × latency.
+    - throughput = rpm/60 (requests/second)
+    - latency: thời gian trung bình một request hoàn tất (giây)
+    - safety: hệ số an toàn để không chạm trần RPM (mặc định 85%)
+
+    Args:
+        rpm: Requests Per Minute mục tiêu (per-project đối với Google AI free)
+        avg_latency_s: Độ trễ trung bình mỗi request (giây). 2.0s là bảo thủ cho Google AI free.
+        safety: Hệ số an toàn (<1.0) để tránh va vào giới hạn.
+        max_threads: Giới hạn trên threads để tránh quá tải hệ thống.
+        min_threads: Giới hạn dưới threads.
+
+    Returns:
+        Số threads đề xuất (int)
+    """
+    try:
+        rpm = int(rpm)
+        if rpm <= 0:
+            return min_threads
+    except (ValueError, TypeError):
+        return min_threads
+
+    req_per_sec_safe = (rpm / 60.0) * max(0.1, min(safety, 0.99))
+    concurrency = math.ceil(req_per_sec_safe * max(0.2, avg_latency_s))
+    return max(min_threads, min(max_threads, concurrency))
 
 
 def is_bad_translation(text, input_text=None):
@@ -564,13 +841,13 @@ def is_bad_translation(text, input_text=None):
 
     text_stripped = text.strip()
     
+    # Ký tự cuối hợp lệ (response hoàn chỉnh) - define globally
+    valid_ending_chars = '.!?。！？"』」)）…—'
+    
     # Kiểm tra response có hoàn chỉnh không dựa trên ký tự cuối
+    last_char = text_stripped[-1] if text_stripped else ''
+    
     if len(text_stripped) > 20:  # Chỉ check với text đủ dài
-        last_char = text_stripped[-1]
-        
-        # Ký tự cuối hợp lệ (response hoàn chỉnh)
-        valid_ending_chars = '.!?。！？"』」)）…—'
-        
         # Ký tự cuối không hợp lệ (response chưa hoàn chỉnh)
         invalid_ending_chars = ' \t\n'  # space, tab, newline
         
@@ -773,6 +1050,10 @@ def translate_chunk(model, chunk_lines, system_instruction, context="modern"):
         # Nếu không bị chặn, trả về văn bản dịch
         translated_text = response.text
         is_bad = is_bad_translation(translated_text, full_text_to_translate)
+        
+        # 🐛 DEBUG: Lưu response ngay lập tức (sẽ được gọi từ process_chunk với metadata đầy đủ)
+        # Note: chunk_index sẽ được truyền từ process_chunk
+        
         return (translated_text, False, is_bad)
 
     except Exception as e:
@@ -910,11 +1191,14 @@ def translate_sub_chunk_recursive(model, sub_chunk, system_instruction, context,
         
         # Kiểm tra nếu bị cắt
         if "[BỊ CẮT - CẦN CHUNK NHỎ HƠN]" in translated_sub:
-            print(f"{level_prefix}🔄 Level {level} - Bị cắt, chia nhỏ xuống level {level + 1}...")
-            return split_and_translate_recursive(model, sub_chunk, system_instruction, context, 
+            print(f"{level_prefix}🔄 Level {level} - Sub-chunk {sub_index} bị cắt, chia nhỏ xuống level {level + 1}...")
+            result, success = split_and_translate_recursive(model, sub_chunk, system_instruction, context, 
                                                 chunk_index, sub_index, level + 1, max_level,
                                                 use_google_ai, use_openrouter, api_key, model_name, 
                                                 openrouter_translate_chunk, key_rotator, tried_keys)
+            if success:
+                print(f"{level_prefix}✅ Level {level} - Sub-chunk {sub_index} đã xử lý thành công qua recursive splitting")
+            return (result, success)
         
         if not is_bad_sub:
             print(f"{level_prefix}✅ Level {level} - Sub-chunk {sub_index} thành công")
@@ -1064,7 +1348,7 @@ def split_and_translate_recursive(model, chunk_lines, system_instruction, contex
     
     return (combined, success)
 
-def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None, context="modern", is_paid_key=False, adaptive_thread_manager=None):
+def process_chunk(api_key, model_name, system_instruction, chunk_data, provider="OpenRouter", log_callback=None, key_rotator=None, context="modern", is_paid_key=False, adaptive_thread_manager=None, input_file=None, model_settings=None):
     """
     Xử lý dịch một chunk với retry logic, rate limiting và re-chunking.
     chunk_data: tuple (chunk_index, chunk_lines, chunk_start_line_index)
@@ -1073,8 +1357,17 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
     Args:
         key_rotator: KeyRotator instance nếu sử dụng multiple keys (Google AI only)
         context: "modern" (hiện đại) hoặc "ancient" (cổ đại) để xác định danh xưng người kể chuyện
+        input_file: Đường dẫn file input (dùng cho debug logging)
+        model_settings: Dict chứa các cài đặt model (thinking_mode, thinking_budget, etc.)
     """
     chunk_index, chunk_lines, chunk_start_line_index = chunk_data
+    
+    # Extract model settings
+    if model_settings is None:
+        model_settings = {}
+    
+    thinking_mode = model_settings.get("thinking_mode", False)
+    thinking_budget = model_settings.get("thinking_budget", 0)
     
     # Tính toán line range cho chunk hiện tại
     chunk_end_line_index = chunk_start_line_index + len(chunk_lines) - 1
@@ -1083,15 +1376,36 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
     # Get current API key (from rotator if available)
     current_api_key = key_rotator.get_next_key() if key_rotator else api_key
     
-    # Get rate limiter cho Google AI với specific key (None cho OpenRouter)
-    rate_limiter = get_rate_limiter(model_name, provider, current_api_key if provider == "Google AI" else None, is_paid_key=is_paid_key)
+    # Get ENHANCED rate limiter cho Google AI với specific key (None cho OpenRouter)
+    rate_limiter = get_enhanced_rate_limiter(
+        model_name, 
+        provider, 
+        current_api_key if provider == "Google AI" else None, 
+        is_paid_key=is_paid_key,
+        desired_rpm=model_settings.get("target_rpm") if provider == "Google AI" else None
+    )
     
-    # Debug logging
+    # Estimate tokens for this chunk (for TPM tracking)
+    chunk_text = "\n".join(chunk_lines)
+    estimated_tokens = estimate_tokens(chunk_text) if rate_limiter else 0
+    
+    # Debug logging với detailed state
     if rate_limiter and provider == "Google AI":
-        current_usage = rate_limiter.get_current_usage()
-        wait_time = rate_limiter.get_wait_time()
-        if wait_time > 0:
-            print(f"⏱️ Chunk {chunk_index}: Current usage {current_usage} requests, cần đợi {wait_time:.1f}s")
+        stats = rate_limiter.get_stats()
+        rpm_usage = stats.get('rpm_usage', 0)
+        rpm_max = stats.get('rpm_max', 0)
+        rpm_utilization = stats.get('rpm_utilization', 0)
+        tpm_usage = stats.get('tpm_usage', 0)
+        tpm_max = stats.get('tpm_max', 0)
+        
+        # Show stats periodically or when high utilization
+        if rpm_usage > 0 and (chunk_index % 20 == 0 or rpm_utilization > 0.8):
+            print(f"⏱️ Chunk {chunk_index}: RPM {rpm_usage}/{rpm_max} ({rpm_utilization:.0%}), TPM {tpm_usage:,}/{tpm_max:,}, Est: {estimated_tokens} tokens")
+            
+            # Debug detailed state khi rate limit gần full
+            if rpm_utilization > 0.9:
+                print(f"⚠️ WARNING: RPM usage at {rpm_utilization:.0%} - detailed debug:")
+                rate_limiter.debug_state()
     
     # Kiểm tra flag dừng và quota exceeded trước khi bắt đầu
     if is_translation_stopped() or is_quota_exceeded():
@@ -1114,7 +1428,32 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
         try:
             import google.generativeai as genai
             genai.configure(api_key=current_api_key)
-            model = genai.GenerativeModel(model_name)
+            
+            # Build generation config với thinking mode support
+            generation_config = {
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 8192,
+            }
+            
+            # Add thinking config nếu enabled (chỉ cho Gemini 2.5+)
+            if thinking_mode and thinking_budget > 0:
+                generation_config["thinking_config"] = {
+                    "thinking_budget": thinking_budget
+                }
+                print(f"🧠 Chunk {chunk_index}: Thinking Mode enabled (budget: {thinking_budget} tokens)")
+            
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config,
+                safety_settings={
+                    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                }
+            )
         except ImportError:
             error_text = format_error_chunk("IMPORT ERROR", "Google AI module không tìm thấy. Vui lòng cài đặt: pip install google-generativeai", chunk_lines, line_range)
             return (chunk_index, error_text, len(chunk_lines), line_range)
@@ -1162,17 +1501,34 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                 rate_limit_retry = 0
                 while rate_limit_retry <= MAX_RETRIES_ON_RATE_LIMIT:
                     try:
-                        # Rate limit cho Google AI - Multi-threading safe
+                        # Rate limit cho Google AI - Multi-threading safe với TPM tracking
                         if rate_limiter and use_google_ai:
-                            rate_limiter.acquire()  # Non-blocking multi-thread acquire
+                            rate_limiter.acquire(estimated_tokens=estimated_tokens)  # Enhanced acquire với TPM
                         
                         if use_google_ai:
                             # Dịch với Google AI sử dụng hàm translate_chunk với system_instruction đầy đủ
                             translated_text, is_safety_blocked, is_bad = translate_chunk(model, chunk_lines, system_instruction, context)
                             
+                            # 🐛 DEBUG: Lưu response ngay lập tức
+                            key_hash = _get_key_hash(current_api_key) if current_api_key else "unknown"
+                            if input_file:
+                                save_debug_response(
+                                    chunk_index=chunk_index,
+                                    response_text=translated_text,
+                                    chunk_lines=chunk_lines,
+                                    input_file=input_file,
+                                    provider=provider,
+                                    model_name=model_name,
+                                    key_hash=key_hash
+                                )
+                            
                             # Báo success cho adaptive throttling
                             if rate_limiter:
                                 rate_limiter.on_success()
+                            
+                            # Báo success cho key rotator (ImprovedKeyRotator)
+                            if key_rotator and hasattr(key_rotator, 'report_success'):
+                                key_rotator.report_success(current_api_key)
                             
                             # Báo success cho adaptive thread manager
                             if adaptive_thread_manager:
@@ -1182,6 +1538,19 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                                 
                         elif use_openrouter:
                             translated_text, is_safety_blocked, is_bad = openrouter_translate_chunk(api_key, model_name, system_instruction, chunk_lines, context)
+                            
+                            # 🐛 DEBUG: Lưu response ngay lập tức
+                            key_hash = _get_key_hash(api_key) if api_key else "unknown"
+                            if input_file:
+                                save_debug_response(
+                                    chunk_index=chunk_index,
+                                    response_text=translated_text,
+                                    chunk_lines=chunk_lines,
+                                    input_file=input_file,
+                                    provider=provider,
+                                    model_name=model_name,
+                                    key_hash=key_hash
+                                )
                             
                             # Báo success cho adaptive thread manager
                             if adaptive_thread_manager:
@@ -1204,6 +1573,10 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                             # Báo rate limit error cho adaptive throttling
                             if rate_limiter and use_google_ai:
                                 rate_limiter.on_rate_limit_error()
+                            
+                            # Báo rate limit error cho key rotator (ImprovedKeyRotator)
+                            if key_rotator and hasattr(key_rotator, 'report_error'):
+                                key_rotator.report_error(current_api_key, is_rate_limit=True)
                             
                             # Báo rate limit cho adaptive thread manager
                             if adaptive_thread_manager:
@@ -1293,11 +1666,21 @@ def process_chunk(api_key, model_name, system_instruction, chunk_data, provider=
                     if check_quota_error(error_msg):
                         # Google AI quota exceeded
                         set_quota_exceeded()
+                        
+                        # Báo error cho key rotator
+                        if key_rotator and hasattr(key_rotator, 'report_error'):
+                            key_rotator.report_error(current_api_key, is_rate_limit=False)
+                        
                         error_text = format_error_chunk("API HẾT QUOTA", f"Google AI hết quota: {error_msg}", chunk_lines, line_range)
                         return (chunk_index, error_text, len(chunk_lines), line_range)
                     elif is_rate_limit_error(error_msg):
                         # Google AI rate limit - có thể retry
                         print(f"⚠️ Google AI rate limit tại chunk {chunk_index}, sẽ retry...")
+                        
+                        # Báo rate limit error cho key rotator
+                        if key_rotator and hasattr(key_rotator, 'report_error'):
+                            key_rotator.report_error(current_api_key, is_rate_limit=True)
+                        
                         continue
                     elif "context_length" in error_msg.lower() or "too long" in error_msg.lower() or "maximum" in error_msg.lower():
                         # Context length error - chia nhỏ chunk với recursive 3 level
@@ -1436,7 +1819,7 @@ def generate_output_filename(input_filepath):
     else:
         return new_name
 
-def translate_file_optimized(input_file, output_file=None, api_key=None, model_name="gemini-2.0-flash", system_instruction=None, num_workers=None, chunk_size_lines=None, provider="OpenRouter", context="modern", is_paid_key=False):
+def translate_file_optimized(input_file, output_file=None, api_key=None, model_name="gemini-2.0-flash", system_instruction=None, num_workers=None, chunk_size_lines=None, provider="OpenRouter", context="modern", is_paid_key=False, model_settings=None):
     """
     Phiên bản dịch file với multi-threading chunks.
     
@@ -1444,14 +1827,30 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
         api_key: String (OpenRouter) hoặc List (Google AI multiple keys)
         context: "modern" (hiện đại - dùng "tôi") hoặc "ancient" (cổ đại - dùng "ta")
         is_paid_key: True nếu sử dụng Google AI key trả phí
+        model_settings: Dict chứa các cài đặt model (thinking_mode, thinking_budget, temperature, etc.)
     """
     # Clear stop flag khi bắt đầu dịch mới
     clear_stop_translation()
     
+    # Extract model settings nếu có
+    if model_settings is None:
+        model_settings = {}
+    
+    thinking_mode = model_settings.get("thinking_mode", False)
+    thinking_budget = model_settings.get("thinking_budget", 0)
+    
+    # Log thinking mode status
+    if thinking_mode and thinking_budget > 0:
+        print(f"🧠 Thinking Mode: BẬT (Budget: {thinking_budget} tokens)")
+    else:
+        print(f"🧠 Thinking Mode: TẮT")
+    
     # Setup key rotator nếu có multiple Google AI keys
     key_rotator = None
     if provider == "Google AI" and isinstance(api_key, list) and len(api_key) > 1:
-        key_rotator = KeyRotator(api_key)
+        # ✨ Sử dụng create_key_rotator để tự động chọn ImprovedKeyRotator hoặc KeyRotator
+        # same_project=False vì ta đã xác nhận keys từ different projects
+        key_rotator = create_key_rotator(api_key, same_project=False)
         # Dùng key đầu tiên để validate
         validation_key = api_key[0]
     elif provider == "Google AI" and isinstance(api_key, list):
@@ -1466,70 +1865,82 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     else:
         num_workers = validate_threads(num_workers)
     
-    # Tính toán threads cho Google AI dựa trên số lượng keys
-    if provider == "Google AI":
+    # 🔧 TỰ ĐỘNG TÍNH TOÁN THREADS CHO GOOGLE AI + FREE KEYS + MULTI-KEY
+    # User KHÔNG THỂ override khi dùng nhiều free keys
+    if provider == "Google AI" and not is_paid_key:
         is_multi_key = isinstance(api_key, list) and len(api_key) > 1
         
         if is_multi_key:
             num_keys = len(api_key)
             
-            # Ước tính RPM dựa trên model để hiển thị log cho người dùng
-            if "pro" in model_name.lower():
+            # Xác định RPM dựa trên model
+            # Updated October 2025: gemini-2.5-flash RPM reduced to 5
+            if "2.0-flash-lite" in model_name.lower():
+                base_rpm = 30
+            elif "2.0-flash" in model_name.lower():
+                base_rpm = 15
+            elif "2.5-flash" in model_name.lower():
+                base_rpm = 5  # ⚠️ UPDATED: 5 RPM (not 10)
+            elif "2.5-pro" in model_name.lower():
+                base_rpm = 5
+            elif "1.5-flash" in model_name.lower():
+                base_rpm = 15
+            elif "1.5-pro" in model_name.lower():
+                base_rpm = 2
+            elif "pro" in model_name.lower():
                 base_rpm = 2
             else:
-                base_rpm = 10 # Ước tính an toàn cho các model Flash
+                base_rpm = 10  # Default safe
             
-            # NEW: Nếu số keys > 5, TIN TƯỞNG vào user input, không điều chỉnh tự động
-            if num_keys > 5:
-                print(f"Google AI (Nhiều Keys - {num_keys} keys):")
-                print(f"   Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
-                print(f"   ✅ Sử dụng {num_workers} threads theo cài đặt của người dùng.")
-                print(f"   💡 Với {num_keys} keys, bạn có thể tăng threads để tối ưu hiệu suất.")
-                print(f"   📌 Khuyến nghị: {num_keys * 2}-{num_keys * 3} threads cho hiệu suất tốt nhất.")
-                # Không điều chỉnh num_workers, dùng input của user
+            # 🚨 FORCE AUTO-CALCULATE: User input bị bỏ qua!
+            # Calculate safe RPM (same logic as rate limiter)
+            safe_rpm = int(base_rpm * 0.85)
+            if safe_rpm < 1:
+                safe_rpm = 1
+            
+            # 🌐 GLOBAL RATE LIMIT (per-project, not per-key!)
+            # Multiple keys from SAME project share the SAME rate limit
+            # → Threads = safe_rpm (NOT multiplied by num_keys!)
+            optimal_threads = safe_rpm
+            
+            # Minimum: at least 1 thread per 2 keys (for rotation)
+            min_threads = max(1, num_keys // 2)
+            optimal_threads = max(optimal_threads, min_threads)
+            
+            # Maximum: never exceed safe_rpm (no benefit, causes rate limit)
+            optimal_threads = min(optimal_threads, safe_rpm)
+            
+            print(f"🔧 Google AI Free Keys - AUTO MODE (User input BỊ BỎ QUA)")
+            print(f"   📊 Model: {model_name}")
+            print(f"   🔑 Keys: {num_keys} keys")
+            print(f"   📈 Base RPM: {base_rpm}, Safe RPM: {safe_rpm} (×0.85)")
+            print(f"   🌐 GLOBAL LIMIT: Tất cả keys chia sẻ {safe_rpm} RPM")
+            print(f"   🎯 Auto-calculated threads: {optimal_threads}")
+            print(f"   💡 Formula: safe_rpm = {safe_rpm} (KHÔNG nhân với số keys!)")
+            print(f"   ⚠️  Multiple keys CHỈ để rotate/failover, KHÔNG tăng throughput")
+            
+            if num_workers != optimal_threads:
+                print(f"   ⚠️  User input ({num_workers}) → OVERRIDDEN → {optimal_threads} threads")
             else:
-                # Chỉ tự động điều chỉnh số threads khi có <= 5 keys (chế độ free)
-                # để tránh chạm vào giới hạn rate limit quá nhanh.
-                
-                # Tính toán threads thông minh dựa trên số keys và cấu hình máy
-                cpu_cores = cpu_count()
-                
-                # Base threads: 1-1.5 threads per key, nhưng cân nhắc CPU cores
-                base_threads_per_key = 1.2  # Trung bình 1.2 threads/key
-                threads_from_keys = int(num_keys * base_threads_per_key)
-                
-                # Threads từ CPU: I/O bound nên có thể dùng nhiều hơn cores
-                threads_from_cpu = min(cpu_cores * 3, 50)  # Tối đa 50 threads
-                
-                # Lấy min của 2 giá trị để cân bằng
-                max_threads_for_free_keys = min(threads_from_keys, threads_from_cpu)
-                
-                # Đảm bảo tối thiểu và tối đa hợp lý
-                max_threads_for_free_keys = max(max_threads_for_free_keys, min(num_keys, 5))  # Tối thiểu 5 hoặc số keys
-                max_threads_for_free_keys = min(max_threads_for_free_keys, 50)  # Tối đa 50 threads
-                
-                print(f"   Tính toán threads:")
-                print(f"     • {num_keys} keys x {base_threads_per_key} = {threads_from_keys} threads")
-                print(f"     • {cpu_cores} CPU cores x 3 = {threads_from_cpu} threads")
-                print(f"     • Chọn min({threads_from_keys}, {threads_from_cpu}) = {max_threads_for_free_keys} threads")
-                
-                if num_workers > max_threads_for_free_keys:
-                    print(f"Google AI (Chế độ Free - {num_keys} keys):")
-                    print(f"   Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
-                    print(f"   Điều chỉnh Threads: {num_workers} -> {max_threads_for_free_keys} (tối ưu cho {num_keys} keys)")
-                    print(f"   Tham khảo rate limits tại trang chủ Google AI.")
-                    num_workers = max_threads_for_free_keys
-                else:
-                    print(f"Google AI (Chế độ Free - {num_keys} keys):")
-                    print(f"   Tổng RPM ước tính: ~{base_rpm * num_keys} RPM")
-                    print(f"   Sử dụng {num_workers} threads theo cài đặt.")
+                print(f"   ✅ Threads đã được tính toán tối ưu")
+            
+            # FORCE override user input
+            num_workers = optimal_threads
+            
         else:
-            # Với 1 key (chế độ trả phí hoặc 1 key free), tin tưởng vào setting của người dùng.
-            # Key trả phí có RPM cao hơn nhiều.
-            print(f"Google AI (Chế độ 1 Key - Paid/Free):")
-            print(f"   Sử dụng {num_workers} threads theo cài đặt của người dùng.")
-            print(f"   Lưu ý: Nếu dùng key trả phí, bạn có thể tăng số threads để dịch nhanh hơn.")
-            print(f"   Nếu dùng key free, hãy cẩn thận với rate limit.")
+            # Single free key: User có thể tự set, nhưng warning nếu quá cao
+            print(f"Google AI (1 Free Key):")
+            print(f"   ✅ Sử dụng {num_workers} threads theo cài đặt của bạn")
+            print(f"   ⚠️  Lưu ý: Free key có giới hạn RPM thấp, tránh set threads quá cao!")
+            
+    elif provider == "Google AI" and is_paid_key:
+        # Paid key: User tự quản lý, không can thiệp
+        print(f"Google AI (Paid Key):")
+        print(f"   💳 Paid key detected - high rate limits")
+        print(f"   ✅ Sử dụng {num_workers} threads theo cài đặt của bạn")
+        print(f"   💡 Paid keys có thể handle threads cao hơn")
+        
+    # OpenRouter và các provider khác: User tự quản lý
         
     if chunk_size_lines is None:
         chunk_size_lines = CHUNK_SIZE_LINES
@@ -1585,17 +1996,27 @@ def translate_file_optimized(input_file, output_file=None, api_key=None, model_n
     
     # System instruction cho AI - sử dụng custom hoặc default
     if system_instruction is None:
-        system_instruction = """NHIỆM VỤ: Dịch văn bản sang tiếng Việt hiện đại, tự nhiên.
+        system_instruction = """NHIỆM VỤ CHÍNH: Dịch văn bản sang tiếng Việt hiện đại, tự nhiên, đảm bảo xưng hô chính xác và phù hợp với mối quan hệ nhân vật.
 
-QUY TẮC QUAN TRỌNG:
-1. VĂN PHONG: Dịch như người Việt nói chuyện hàng ngày, tránh từ Hán Việt cứng nhắc
-2. NGƯỜI KỂ CHUYỆN: Luôn xưng "tôi" (hiện đại) hoặc "ta" (cổ đại). TUYỆT ĐỐI KHÔNG dùng "ba/bố/anh/chị/em/con"
-3. LỜI THOẠI: Đặt trong dấu ngoặc kép "...", xưng hô tự nhiên theo quan hệ nhân vật
-4. TỪNG NGỮ HIỆN ĐẠI: "Cảm thấy" thay vì "cảm nhận", "Anh ấy/Cô ấy" thay vì "Hắn/Nàng"
+QUY TẮC PHÂN TÍCH VÀ DỊCH THUẬT:
+1.  **XÁC ĐỊNH BỐI CẢNH:** Trước khi dịch, hãy phân tích kỹ lưỡng bối cảnh, vai vế, tuổi tác, và cấp bậc giữa các nhân vật để xác định mối quan hệ chính xác (ví dụ: con cái - cha mẹ, cấp dưới - cấp trên, vợ chồng, người yêu, bạn bè thân thiết, người lạ...).
+2.  **VĂN PHONG CHUNG:**
+    * **Ngôn ngữ:** Sử dụng tiếng Việt giao tiếp hàng ngày, tự nhiên, lưu loát.
+    * **Từ ngữ:** Hạn chế tối đa từ Hán Việt cứng nhắc, thay thế bằng từ ngữ phổ thông hiện đại. Ví dụ: "cảm thấy" thay vì "cảm nhận", "người kia" hoặc "Anh ấy/Cô ấy" thay vì "Hắn/Nàng".
+3.  **XƯNG HÔ CỐ ĐỊNH (Người Kể Chuyện/Ngoại Cảnh):**
+    * **Người Kể Chuyện (Thứ Ba hoặc Thứ Nhất):** Luôn xưng "tôi" (hiện đại) hoặc "ta" (bối cảnh cổ đại/giả tưởng).
+    * **Đối tượng được nhắc đến:** Luôn gọi là "Anh ấy/Cô ấy" (khi là nhân vật chính) hoặc dùng danh xưng tương ứng với mối quan hệ của nhân vật chính (ví dụ: "mẹ của anh ấy", "sếp của cô ấy").
+    * **TUYỆT ĐỐI KHÔNG** dùng danh xưng gia đình (bố/mẹ/anh/chị/em/con) để gọi người kể chuyện hoặc các nhân vật được nhắc đến ở ngôi thứ ba.
+4.  **XƯNG HÔ LỜI THOẠI (Trực tiếp):**
+    * Lời thoại phải được đặt trong dấu ngoặc kép "...".
+    * **Danh Xưng:** Dựa trên MỐI QUAN HỆ đã xác định ở Mục 1 để chọn danh xưng (anh/em, cô/chú, mày/tao, bố/con, sếp/tôi...) SAO CHO TỰ NHIÊN và PHÙ HỢP VỚI VĂN HÓA GIAO TIẾP CỦA NGƯỜI VIỆT.
+5.  **TỪ NGỮ GỢI DỤC, KÍCH THÍCH, KHIÊU DÂM:**
+    * Dùng TRỰC TIẾP các từ  ngữ GỢI DỤC, KÍCH THÍCH, KHIÊU DÂM. Không được dùng từ nói giảm nói tránh như "cái ấy", "cái đó",....
+6. 
+⚠️ QUAN TRỌNG: CHỈ TRẢ VỀ BẢN DỊCH, KHÔNG GIẢI THÍCH, KHÔNG BÌNH LUẬN, KHÔNG ĐẶT TÊN NHÂN VẬT, KHÔNG CÓ BẤT KỲ THÔNG TIN PHỤ NÀO KHÁC!
 
-⚠️ QUAN TRỌNG: CHỈ TRẢ VỀ BẢN DỊCH, KHÔNG GIẢI THÍCH GÌ THÊM!
-
-Văn bản cần dịch:"""
+Văn bản cần dịch:
+"""
     
     print(f"🎯 System instruction: {system_instruction[:100]}...")  # Log first 100 chars
 
@@ -1666,8 +2087,8 @@ Văn bản cần dịch:"""
                             print("🛑 Dừng gửi chunks mới do người dùng yêu cầu")
                             break
                             
-                        # Submit với key_rotator, context và adaptive_thread_manager
-                        future = executor.submit(process_chunk, api_key, model_name, system_instruction, chunk_data, provider, None, key_rotator, context, is_paid_key, adaptive_thread_manager)
+                        # Submit với key_rotator, context, adaptive_thread_manager và input_file
+                        future = executor.submit(process_chunk, api_key, model_name, system_instruction, chunk_data, provider, None, key_rotator, context, is_paid_key, adaptive_thread_manager, input_file, model_settings)
                         futures[future] = chunk_data[0]  # chunk_index
                     
                     # Thu thập kết quả khi các threads hoàn thành
@@ -1823,18 +2244,37 @@ Văn bản cần dịch:"""
                 # Print key usage stats if using key rotator
                 if key_rotator:
                     key_rotator.print_stats()
+                    
+                    # Print health summary for ImprovedKeyRotator
+                    if hasattr(key_rotator, 'get_health_summary'):
+                        summary = key_rotator.get_health_summary()
+                        print(f"\n📊 Key Health Summary:")
+                        print(f"   Healthy keys: {summary['healthy_keys']}/{summary['total_keys']}")
+                        print(f"   Total success: {summary['total_success']}")
+                        print(f"   Total errors: {summary['total_error']}")
+                        print(f"   Rate limit errors: {summary['total_rate_limit']}")
+                        print(f"   Overall success rate: {summary['success_rate']:.1f}%")
+                        print()
                 
-                # Print rate limiter stats for Google AI
+                # Print ENHANCED rate limiter stats for Google AI
                 if provider == "Google AI" and key_rotator:
-                    print("\n📊 Rate Limiter Statistics:")
-                    for i, key in enumerate(key_rotator.keys, 1):
-                        limiter = get_rate_limiter(model_name, provider, key)
+                    print("\n📊 Enhanced Rate Limiter Statistics:")
+                    for i, key in enumerate(key_rotator.keys if hasattr(key_rotator, 'keys') else key_rotator.api_keys, 1):
+                        limiter = get_enhanced_rate_limiter(model_name, provider, key, is_paid_key)
                         if limiter:
                             stats = limiter.get_stats()
                             key_display = f"key_***{_get_key_hash(key)}"
                             print(f"   Key #{i} ({key_display}):")
-                            print(f"     Usage: {stats['current_usage']}/{stats['max_requests']} ({stats['utilization']:.1%})")
-                            print(f"     Throttle: {stats['throttle_factor']:.1%} (errors: {stats['consecutive_errors']})")
+                            print(f"     RPM: {stats['rpm_usage']}/{stats['rpm_max']} ({stats['rpm_utilization']:.1%})")
+                            
+                            if stats.get('tpm_max'):
+                                print(f"     TPM: {stats['tpm_usage']:,}/{stats['tpm_max']:,} ({stats['tpm_utilization']:.1%})")
+                            
+                            if stats.get('rpd_max'):
+                                print(f"     RPD: {stats['rpd_usage']}/{stats['rpd_max']} ({stats['rpd_remaining']} remaining)")
+                            
+                            if stats.get('throttle_factor', 1.0) < 1.0:
+                                print(f"     Throttle: {stats['throttle_factor']:.1%} (errors: {stats['consecutive_errors']})")
                     print()
 
                 # Xóa file tiến độ khi hoàn thành
@@ -1986,6 +2426,24 @@ def main():
         print("💾 Tiến độ đã được lưu, có thể tiếp tục sau.")
     except Exception as e:
         print(f"\n❌ Lỗi không mong muốn: {e}")
+
+
+# --- DEBUG MODE CONTROL ---
+def enable_debug_response():
+    """Bật chế độ debug - lưu tất cả responses vào file"""
+    global DEBUG_RESPONSE_ENABLED
+    DEBUG_RESPONSE_ENABLED = True
+    print("🐛 Debug mode: ENABLED - Responses sẽ được lưu vào file debug")
+
+def disable_debug_response():
+    """Tắt chế độ debug"""
+    global DEBUG_RESPONSE_ENABLED
+    DEBUG_RESPONSE_ENABLED = False
+    print("🐛 Debug mode: DISABLED")
+
+def is_debug_enabled():
+    """Kiểm tra trạng thái debug mode"""
+    return DEBUG_RESPONSE_ENABLED
 
 
 if __name__ == "__main__":

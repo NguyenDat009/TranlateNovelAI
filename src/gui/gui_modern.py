@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import os
 import sys
 
@@ -64,7 +64,7 @@ EPUB_AVAILABLE = False
 # Try relative imports first (when run as module)
 try:
     # Import OpenRouter translate functions instead of original translate
-    from ..core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded, validate_api_key_before_translation
+    from ..core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded, validate_api_key_before_translation, threads_from_rpm
     from ..core.reformat import fix_text_format
     from ..core.ConvertEpub import txt_to_docx, docx_to_epub
     TRANSLATE_AVAILABLE = True
@@ -73,7 +73,7 @@ except ImportError:
     # Try absolute imports (when run directly)
     try:
         # Import OpenRouter translate functions instead of original translate
-        from core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded, validate_api_key_before_translation
+        from core.translate import translate_file_optimized, generate_output_filename, set_stop_translation, clear_stop_translation, is_translation_stopped, is_quota_exceeded, validate_api_key_before_translation, threads_from_rpm
         from core.reformat import fix_text_format
         from core.ConvertEpub import txt_to_docx, docx_to_epub
         TRANSLATE_AVAILABLE = True
@@ -175,6 +175,8 @@ class ModernTranslateNovelAI(ctk.CTk):
         self.custom_chapter_pattern_var = ctk.StringVar(value=r"^Chương\s+\d+:\s+.*$")
         self.threads_var = ctk.StringVar()
         self.chunk_size_var = ctk.StringVar(value="100")
+        self.google_ai_rpm_var = ctk.StringVar(value="")
+        self.recommended_threads_text = ctk.StringVar(value="")
         
         # Saved custom models list
         self.saved_custom_models = []
@@ -299,6 +301,9 @@ class ModernTranslateNovelAI(ctk.CTk):
         )
         self.google_ai_keys_textbox.grid(row=6, column=0, padx=20, pady=(0, 5), sticky="ew")
         
+        # Bind event to detect key changes
+        self.google_ai_keys_textbox.bind("<KeyRelease>", lambda e: self.update_threads_ui_state())
+        
         # New: Google AI Paid Key Entry
         self.google_ai_paid_key_label = ctk.CTkLabel(
             self.sidebar_frame,
@@ -392,9 +397,41 @@ class ModernTranslateNovelAI(ctk.CTk):
         )
         self.performance_label.grid(row=13, column=0, padx=20, pady=(20, 5), sticky="ew")
         
+        # Google AI Target RPM
+        self.rpm_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
+        self.rpm_frame.grid(row=14, column=0, padx=20, pady=(0,5), sticky="ew")
+        self.rpm_frame.grid_columnconfigure(1, weight=1)
+
+        self.rpm_label = ctk.CTkLabel(
+            self.rpm_frame,
+            text="Google AI RPM:",
+            font=ctk.CTkFont(size=12)
+        )
+        self.rpm_label.grid(row=0, column=0, sticky="w")
+
+        self.rpm_entry = ctk.CTkEntry(
+            self.rpm_frame,
+            textvariable=self.google_ai_rpm_var,
+            placeholder_text="ví dụ: 5, 10, 15",
+            width=80,
+            height=28
+        )
+        self.rpm_entry.grid(row=0, column=1, padx=(5, 0), sticky="e")
+
+        self.rpm_hint = ctk.CTkLabel(
+            self.rpm_frame,
+            textvariable=self.recommended_threads_text,
+            font=ctk.CTkFont(size=10),
+            text_color="gray"
+        )
+        self.rpm_hint.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2,0))
+
+        # Update threads recommendation when RPM changes
+        self.rpm_entry.bind("<KeyRelease>", lambda e: self.update_threads_ui_state())
+
         # Threads setting
         self.threads_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.threads_frame.grid(row=14, column=0, padx=20, pady=5, sticky="ew")
+        self.threads_frame.grid(row=15, column=0, padx=20, pady=5, sticky="ew")
         self.threads_frame.grid_columnconfigure(1, weight=1)
         
         self.threads_label = ctk.CTkLabel(
@@ -412,7 +449,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         )
         self.threads_entry.grid(row=0, column=1, padx=(5, 0), sticky="e")
         
-        # Auto-detect button
+    # Auto-detect button
         self.auto_threads_btn = ctk.CTkButton(
             self.threads_frame,
             text="🔧",
@@ -425,7 +462,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         
         # Chunk size setting
         self.chunk_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.chunk_frame.grid(row=15, column=0, padx=20, pady=5, sticky="ew")
+        self.chunk_frame.grid(row=16, column=0, padx=20, pady=5, sticky="ew")
         self.chunk_frame.grid_columnconfigure(1, weight=1)
         
         self.chunk_label = ctk.CTkLabel(
@@ -450,14 +487,14 @@ class ModernTranslateNovelAI(ctk.CTk):
             text="⚙️ Settings",
             font=ctk.CTkFont(size=16, weight="bold")
         )
-        self.settings_label.grid(row=16, column=0, padx=20, pady=(20, 5), sticky="ew")
+        self.settings_label.grid(row=17, column=0, padx=20, pady=(20, 5), sticky="ew")
         
         self.auto_reformat_check = ctk.CTkCheckBox(
             self.sidebar_frame,
             text="Auto reformat",
             variable=self.auto_reformat_var
         )
-        self.auto_reformat_check.grid(row=17, column=0, padx=20, pady=5, sticky="w")
+        self.auto_reformat_check.grid(row=18, column=0, padx=20, pady=5, sticky="w")
         
         self.auto_epub_check = ctk.CTkCheckBox(
             self.sidebar_frame,
@@ -465,11 +502,11 @@ class ModernTranslateNovelAI(ctk.CTk):
             variable=self.auto_convert_epub_var,
             command=self.on_epub_setting_changed
         )
-        self.auto_epub_check.grid(row=18, column=0, padx=20, pady=5, sticky="w")
+        self.auto_epub_check.grid(row=19, column=0, padx=20, pady=5, sticky="w")
         
         # Control buttons - Grid 1x2 Layout
         self.control_grid_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.control_grid_frame.grid(row=19, column=0, padx=20, pady=10, sticky="ew")
+        self.control_grid_frame.grid(row=20, column=0, padx=20, pady=10, sticky="ew")
         
         # Configure grid columns với weight đều nhau
         for i in range(2):
@@ -524,7 +561,7 @@ class ModernTranslateNovelAI(ctk.CTk):
         
         # Add bottom spacer for better scrolling
         self.bottom_spacer = ctk.CTkFrame(self.sidebar_frame, height=20, fg_color="transparent")
-        self.bottom_spacer.grid(row=20, column=0, padx=20, pady=20, sticky="ew")
+        self.bottom_spacer.grid(row=21, column=0, padx=20, pady=20, sticky="ew")
         
     def setup_main_content(self):
         """Thiết lập nội dung chính"""
@@ -799,6 +836,9 @@ class ModernTranslateNovelAI(ctk.CTk):
     
         # Update model list for the new provider
         self._update_model_list()
+        
+        # Update threads UI state
+        self.update_threads_ui_state()
 
     def _update_model_list(self):
         """Cập nhật danh sách model trong combobox dựa trên provider và các model đã lưu."""
@@ -852,6 +892,63 @@ class ModernTranslateNovelAI(ctk.CTk):
             self.google_ai_paid_key_label.grid()
             self.google_ai_paid_key_entry.grid()
             self.log("💳 Chuyển sang dùng API key trả phí.")
+        
+        # Update threads UI state
+        self.update_threads_ui_state()
+    
+    def update_threads_ui_state(self):
+        """Cập nhật trạng thái UI của threads input dựa trên config hiện tại"""
+        provider = self.api_provider_var.get()
+        key_type = self.google_key_usage_var.get()
+        
+        # Kiểm tra nếu là Google AI + Free Keys + Multi-key
+        is_google_ai = (provider == "Google AI")
+        is_free_keys = (key_type == "Free Keys")
+        
+        # Compute and show recommended threads from RPM (if provided)
+        rec_text = ""
+        rpm_input = self.google_ai_rpm_var.get().strip()
+        rec_threads = None
+        if provider == "Google AI" and rpm_input:
+            try:
+                rpm_val = int(rpm_input)
+                if rpm_val > 0:
+                    rec_threads = threads_from_rpm(rpm_val)
+                    rec_text = f"Khuyến nghị: {rec_threads} threads (an toàn cho {rpm_val} RPM)"
+            except (ValueError, TypeError):
+                rec_text = "RPM không hợp lệ"
+        self.recommended_threads_text.set(rec_text)
+
+        if is_google_ai and is_free_keys:
+            # Kiểm tra số lượng keys
+            keys_text = self.google_ai_keys_textbox.get("1.0", "end-1c").strip()
+            keys = [k.strip() for k in keys_text.split('\n') if k.strip()]
+            is_multi_key = len(keys) > 1
+            
+            if is_multi_key:
+                # AUTO MODE: Disable threads input
+                self.threads_entry.configure(state="disabled", text_color="#888888")
+                self.threads_label.configure(text="Threads (AUTO):", text_color="#FF6B35")
+                self.auto_threads_btn.configure(state="disabled")
+                # Only update hint; don't override threads_var when disabled
+                if rec_threads is not None:
+                    self.log(f"ℹ️ Khuyến nghị threads theo RPM: {rec_threads}")
+                return
+        
+        # Normal mode: Enable threads input
+        self.threads_entry.configure(state="normal", text_color="#FFFFFF")
+        self.threads_label.configure(text="Threads:", text_color="#FFFFFF")
+        self.auto_threads_btn.configure(state="normal")
+
+        # If RPM is provided and threads input is enabled, auto-fill recommended threads
+        if provider == "Google AI" and rec_threads is not None:
+            try:
+                # Update only if empty or different to keep it aligned with RPM
+                current_threads = int(self.threads_var.get()) if self.threads_var.get().strip() else None
+            except (ValueError, TypeError):
+                current_threads = None
+            if current_threads != rec_threads:
+                self.threads_var.set(str(rec_threads))
     
     def on_context_changed(self, choice):
         """Xử lý khi thay đổi bối cảnh dịch"""
@@ -1274,12 +1371,29 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
         # Validate performance settings
         try:
             num_threads = int(self.threads_var.get())
-            if num_threads < 1 or num_threads > 50:
-                show_warning("Số threads phải từ 1 đến 50!", parent=self)
+            if num_threads < 1 or num_threads > 200:
+                show_warning("Số threads phải từ 1 đến 200!", parent=self)
                 return
         except ValueError:
             show_warning("Số threads phải là số nguyên!", parent=self)
             return
+        
+        # 🚨 SPECIAL CHECK: Google AI + Free Keys + Multi-key = AUTO MODE
+        if provider == "Google AI" and self.google_key_usage_var.get() == "Free Keys":
+            if isinstance(api_key, list) and len(api_key) > 1:
+                # Multi free keys detected - notify user về AUTO MODE
+                self.log("="*60)
+                self.log("🔧 CHÉM ĐỘ TỰ ĐỘNG PHÁT HIỆN:")
+                self.log(f"   Provider: Google AI")
+                self.log(f"   Mode: Free Keys")
+                self.log(f"   Keys: {len(api_key)} keys")
+                self.log("="*60)
+                self.log("⚠️  THREADS SẼ ĐƯỢC TỰ ĐỘNG TÍNH TOÁN!")
+                self.log(f"   User input ({num_threads} threads) sẽ bị BỎ QUA")
+                self.log(f"   Hệ thống sẽ tự động tính toán threads tối ưu")
+                self.log(f"   dựa trên số lượng keys và model để tránh rate limit")
+                self.log("="*60)
+                # num_threads will be overridden in translate_file_optimized()
             
         try:
             chunk_size = int(self.chunk_size_var.get())
@@ -1305,9 +1419,15 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             num_keys = len(api_key)
             self.log(f"🔑 Số lượng API keys: {num_keys} keys")
             
+            # Xác định base RPM dựa trên model
+            # Updated October 2025: gemini-2.5-flash RPM reduced to 5
             base_rpm = 10  # Default RPM per key
-            if "pro" in current_model.lower():
+            if "2.5-flash" in current_model.lower() or "2.5-pro" in current_model.lower():
+                base_rpm = 5  # ⚠️ UPDATED: gemini-2.5 models = 5 RPM
+            elif "1.5-pro" in current_model.lower():
                 base_rpm = 2
+            elif "2.0-flash" in current_model.lower():
+                base_rpm = 15
             
             total_rpm = num_keys * base_rpm
             self.log(f"💡 Tổng RPM ước tính: ~{total_rpm} RPM (mỗi key ~{base_rpm} RPM)")
@@ -1527,7 +1647,8 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             "chapter_pattern": self.chapter_pattern_var.get(),
             "custom_chapter_pattern": self.custom_chapter_pattern_var.get(),
             "threads": self.threads_var.get(),
-            "chunk_size": self.chunk_size_var.get()
+            "chunk_size": self.chunk_size_var.get(),
+            "google_ai_rpm": self.google_ai_rpm_var.get()
         }
         
         try:
@@ -1573,6 +1694,8 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
                 
                 self.api_key_var.set(settings.get("api_key", ""))  # Deprecated
                 self.model_var.set(settings.get("model", "anthropic/claude-3.5-sonnet"))
+                # Load Google AI RPM if present
+                self.google_ai_rpm_var.set(settings.get("google_ai_rpm", ""))
                 
                 # Load saved custom models
                 self.saved_custom_models = settings.get("saved_custom_models", [])
@@ -1613,6 +1736,9 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
                 # Trigger API provider change to show/hide API key fields
                 self.on_api_provider_changed(self.api_provider_var.get())
                 self.on_google_key_type_changed(self.google_key_usage_var.get())
+                
+                # Update threads UI state after loading
+                self.update_threads_ui_state()
                 
                 self.log("📂 Đã tải cài đặt")
         except Exception as e:
@@ -1776,6 +1902,31 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
             
             self.log(f"🎯 Context: {context_setting} → {'ta' if context == 'ancient' else 'tôi'}")
             
+            # Get model settings for current model
+            current_model_name = self.get_current_model()
+            model_settings = dict(self.model_settings.get(current_model_name, {}))
+            # Inject target RPM from UI for Google AI
+            if provider == "Google AI":
+                rpm_val = self.google_ai_rpm_var.get().strip()
+                try:
+                    if rpm_val:
+                        rpm_int = int(rpm_val)
+                        if rpm_int > 0:
+                            model_settings["target_rpm"] = rpm_int
+                            self.log(f"🎛️ Áp dụng Target RPM: {rpm_int}")
+                except (ValueError, TypeError):
+                    self.log("⚠️ Google AI RPM không hợp lệ, bỏ qua")
+            # Inject target RPM (for Google AI) into model settings so core can clamp limiter
+            if provider == "Google AI":
+                rpm_str = self.google_ai_rpm_var.get().strip()
+                try:
+                    rpm_val = int(rpm_str) if rpm_str else None
+                except (ValueError, TypeError):
+                    rpm_val = None
+                if rpm_val and rpm_val > 0:
+                    model_settings = dict(model_settings)  # shallow copy to avoid mutating stored default
+                    model_settings["target_rpm"] = rpm_val
+            
             # Use regular translation
             success = translate_file_optimized(
                 input_file=input_file,
@@ -1787,7 +1938,8 @@ CHỈ TRẢ VỀ BẢN DỊCH!""",
                 chunk_size_lines=chunk_size,
                 provider=provider,
                 context=context,
-                is_paid_key=is_paid_key
+                is_paid_key=is_paid_key,
+                model_settings=model_settings  # Truyền model settings vào
             )
             
             # Re-enable UI elements after completion
@@ -2106,6 +2258,7 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
         """Lấy cài đặt mặc định cho model mới."""
         return {
             "thinking_mode": False,
+            "thinking_budget": 0,  # 0 = tắt thinking mode, >0 = bật với budget tương ứng
             "top_p": 1.0,
             "temperature": 1.0,
             "max_tokens": 4096,
@@ -2159,16 +2312,54 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
         
         row = 0
         
-        # Thinking Mode (checkbox)
-        thinking_label = ctk.CTkLabel(settings_frame, text="Thinking Mode:", font=ctk.CTkFont(weight="bold"))
+        # Thinking Mode (checkbox) - Only for Google AI
+        thinking_label = ctk.CTkLabel(settings_frame, text="Thinking Mode (Google AI):", font=ctk.CTkFont(weight="bold"))
         thinking_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
         
+        thinking_mode_var = ctk.BooleanVar(value=current_settings.get("thinking_mode", False))
         self.settings_widgets["thinking_mode"] = ctk.CTkCheckBox(
             settings_frame,
-            text="Bật chế độ suy nghĩ (o1 models)",
-            variable=ctk.BooleanVar(value=current_settings.get("thinking_mode", False))
+            text="Bật chế độ suy nghĩ (Gemini 2.5+)",
+            variable=thinking_mode_var,
+            command=lambda: self._toggle_thinking_budget(thinking_mode_var.get())
         )
         self.settings_widgets["thinking_mode"].grid(row=row, column=1, padx=10, pady=5, sticky="w")
+        row += 1
+        
+        # Thinking Budget (slider) - Only visible when thinking mode is enabled
+        thinking_budget_label = ctk.CTkLabel(settings_frame, text="Thinking Budget:", font=ctk.CTkFont(weight="bold"))
+        thinking_budget_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        
+        # Frame for slider and value label
+        thinking_budget_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        thinking_budget_frame.grid(row=row, column=1, padx=10, pady=5, sticky="ew")
+        thinking_budget_frame.grid_columnconfigure(0, weight=1)
+        
+        thinking_budget_value = current_settings.get("thinking_budget", 0)
+        thinking_budget_var = ctk.IntVar(value=thinking_budget_value)
+        
+        self.settings_widgets["thinking_budget_var"] = thinking_budget_var
+        self.settings_widgets["thinking_budget_label"] = ctk.CTkLabel(
+            thinking_budget_frame, 
+            text=f"{thinking_budget_value} tokens",
+            width=100
+        )
+        self.settings_widgets["thinking_budget_label"].grid(row=0, column=1, padx=(10, 0))
+        
+        self.settings_widgets["thinking_budget"] = ctk.CTkSlider(
+            thinking_budget_frame,
+            from_=0,
+            to=10000,
+            number_of_steps=100,
+            variable=thinking_budget_var,
+            command=lambda val: self.settings_widgets["thinking_budget_label"].configure(text=f"{int(val)} tokens")
+        )
+        self.settings_widgets["thinking_budget"].grid(row=0, column=0, sticky="ew")
+        
+        # Disable budget slider if thinking mode is off
+        if not thinking_mode_var.get():
+            self.settings_widgets["thinking_budget"].configure(state="disabled")
+        
         row += 1
 
         # Temperature
@@ -2306,18 +2497,40 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
             command=lambda: self._save_model_settings(current_model)
         )
         save_btn.grid(row=0, column=2, padx=(5, 0), sticky="ew")
+    
+    def _toggle_thinking_budget(self, is_enabled):
+        """Enable/disable thinking budget slider based on thinking mode checkbox."""
+        if "thinking_budget" in self.settings_widgets:
+            if is_enabled:
+                self.settings_widgets["thinking_budget"].configure(state="normal")
+            else:
+                self.settings_widgets["thinking_budget"].configure(state="disabled")
 
     def _reset_model_settings(self, model_name):
         """Reset cài đặt model về mặc định."""
         default_settings = self._get_default_model_settings()
         
-        # Update widgets
-        self.settings_widgets["thinking_mode"].deselect() if not default_settings["thinking_mode"] else self.settings_widgets["thinking_mode"].select()
+        # Update thinking mode checkbox
+        if default_settings["thinking_mode"]:
+            self.settings_widgets["thinking_mode"].select()
+        else:
+            self.settings_widgets["thinking_mode"].deselect()
         
+        # Update thinking budget
+        if "thinking_budget_var" in self.settings_widgets:
+            self.settings_widgets["thinking_budget_var"].set(default_settings["thinking_budget"])
+            self.settings_widgets["thinking_budget_label"].configure(text=f"{default_settings['thinking_budget']} tokens")
+        
+        # Update other widgets
+        skip_keys = ["thinking_mode", "thinking_budget_var", "thinking_budget_label", "thinking_budget"]
         for key, widget in self.settings_widgets.items():
-            if key != "thinking_mode":  # Skip checkbox
-                widget.delete(0, "end")
-                widget.insert(0, str(default_settings[key]))
+            if key not in skip_keys:
+                if hasattr(widget, 'delete'):  # Entry widget
+                    widget.delete(0, "end")
+                    widget.insert(0, str(default_settings.get(key, "")))
+        
+        # Toggle thinking budget state
+        self._toggle_thinking_budget(default_settings["thinking_mode"])
         
         self.log(f"🔄 Đã reset cài đặt model {model_name} về mặc định")
 
@@ -2328,6 +2541,12 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
             
             # Get thinking mode
             settings["thinking_mode"] = self.settings_widgets["thinking_mode"].get()
+            
+            # Get thinking budget
+            if "thinking_budget_var" in self.settings_widgets:
+                settings["thinking_budget"] = int(self.settings_widgets["thinking_budget_var"].get())
+            else:
+                settings["thinking_budget"] = 0
             
             # Get numeric values
             numeric_fields = ["temperature", "top_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p"]
@@ -2362,6 +2581,10 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
                 show_error("Max Tokens phải từ 1 đến 32768!", parent=self.model_settings_window)
                 return
             
+            if not (0 <= settings["thinking_budget"] <= 10000):
+                show_error("Thinking Budget phải từ 0 đến 10000 tokens!", parent=self.model_settings_window)
+                return
+            
             # Save settings
             self.model_settings[model_name] = settings
             
@@ -2369,8 +2592,9 @@ File tiến độ đã được lưu, bạn có thể tiếp tục dịch ngay s
             self.model_settings_window.destroy()
             
             # Log and show success
-            self.log(f"💾 Đã lưu cài đặt cho model: {model_name}")
-            show_success(f"Đã lưu cài đặt cho model:\n{model_name}", parent=self)
+            thinking_info = f" (Thinking: {settings['thinking_budget']} tokens)" if settings["thinking_mode"] else ""
+            self.log(f"💾 Đã lưu cài đặt cho model: {model_name}{thinking_info}")
+            show_success(f"Đã lưu cài đặt cho model:\n{model_name}{thinking_info}", parent=self)
             
         except Exception as e:
             show_error(f"Lỗi lưu cài đặt: {e}", parent=self.model_settings_window)
